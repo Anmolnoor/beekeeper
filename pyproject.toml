@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beehive-agent-platform"
+version = "0.1.0"
+description = "Beehive-style multi-agent runtime with queen orchestration and ephemeral workers."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "pydantic>=2.7.0",
+  "eval_type_backport>=0.2.0",
+  "celery>=5.4.0",
+  "redis>=5.0.0",
+  "temporalio>=1.7.0",
+  "qdrant-client>=1.10.0",
+]
+
+[project.scripts]
+beehive = "beehive.runner:main"
+
+[tool.setuptools]
+packages = ["beehive"]
+
+[tool.setuptools.package-data]
+beehive = ["souls/*.json", "souls/*.md"]
