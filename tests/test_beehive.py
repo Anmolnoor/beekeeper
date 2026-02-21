@@ -15,7 +15,7 @@ def test_queen_run_creates_results(tmp_path: Path) -> None:
 
 def test_guardrail_blocks_pii(tmp_path: Path) -> None:
     queen = QueenAgent(QueenConfig(honeycomb_root=tmp_path / "honeycomb", max_reruns=0))
-    out = queen.run(intent="research_topic", payload={"email": "alice@example.com"})
+    out = queen.run(intent="research_topic", payload={"email": "alice@example.com", "use_web_search": True})
     statuses = [result["status"] for result in out["results"]]
     assert "blocked" in statuses
 

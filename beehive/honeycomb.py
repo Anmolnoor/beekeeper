@@ -54,6 +54,8 @@ class HoneycombStore:
         self.optimizer_dir = self.root_dir / "optimizer"
         self.archive_dir = self.root_dir / "archive"
         self.human_review_dir = self.root_dir / "human_review"
+        self.backlog_dir = self.root_dir / "backlog"
+        self.sessions_dir = self.root_dir / "sessions"
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.governance_dir.mkdir(parents=True, exist_ok=True)
@@ -62,6 +64,8 @@ class HoneycombStore:
         self.optimizer_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         self.human_review_dir.mkdir(parents=True, exist_ok=True)
+        self.backlog_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.vector_store: VectorStore = build_vector_store(
             config.vector_backend,
             collection=config.vector_collection,
@@ -72,6 +76,39 @@ class HoneycombStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+    def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if not path.exists():
+            return rows
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                row = line.strip()
+                if not row:
+                    continue
+                payload = json.loads(row)
+                if isinstance(payload, dict):
+                    rows.append(payload)
+        return rows
+
+    def list_traces(self, limit: int = 100) -> list[str]:
+        """List trace IDs from events dir, most recent first (by file mtime)."""
+        if not self.events_dir.exists():
+            return []
+        files = sorted(
+            self.events_dir.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return [f.stem for f in files[:limit]]
+
+    def read_events(self, trace_id: str) -> list[dict[str, Any]]:
+        """Read all events for a trace."""
+        return self._read_jsonl(self.events_dir / f"{trace_id}.jsonl")
+
+    def read_graph(self, trace_id: str) -> list[dict[str, Any]]:
+        """Read graph edges (from_task_id, to_task_id) for a trace."""
+        return self._read_jsonl(self.graph_dir / f"{trace_id}.jsonl")
 
     def write_event(self, trace_id: str, row: dict[str, Any]) -> None:
         payload = {"event_id": str(uuid4()), "at": utcnow_iso(), **row}
@@ -359,3 +396,183 @@ class HoneycombStore:
 
     def semantic_search(self, query: str, limit: int = 5) -> list[str]:
         return self.vector_store.search(query, limit=limit)
+
+    def _backlog_path(self) -> Path:
+        return self.backlog_dir / "tasks.jsonl"
+
+    def push_backlog_task(
+        self,
+        *,
+        intent: str,
+        payload: dict[str, Any],
+        source: str = "pulse_manual",
+        priority: int = 0,
+    ) -> str:
+        """Append a task to the backlog. Returns task_id."""
+        task_id = str(uuid4())
+        row = {
+            "task_id": task_id,
+            "intent": intent,
+            "payload": dict(payload),
+            "source": source,
+            "priority": priority,
+            "created_at": utcnow_iso(),
+            "status": "pending",
+        }
+        self._append_jsonl(self._backlog_path(), row)
+        return task_id
+
+    def pull_backlog_tasks(self, limit: int = 5) -> list[dict[str, Any]]:
+        """Pull up to limit pending tasks from the backlog. Removes them from the queue."""
+        path = self._backlog_path()
+        if not path.exists():
+            return []
+        rows = self._read_jsonl(path)
+        pending = [r for r in rows if r.get("status") == "pending"]
+        pending.sort(key=lambda r: (-r.get("priority", 0), r.get("created_at", "")))
+        to_run = pending[:limit]
+        to_keep = [r for r in rows if r not in to_run]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            for r in to_keep:
+                f.write(json.dumps(r, ensure_ascii=True) + "\n")
+        return to_run
+
+    def backlog_size(self) -> int:
+        """Return count of pending tasks in backlog."""
+        path = self._backlog_path()
+        if not path.exists():
+            return 0
+        return sum(1 for r in self._read_jsonl(path) if r.get("status") == "pending")
+
+    # --- Session tree and branching ---
+
+    def _sessions_index_path(self) -> Path:
+        return self.sessions_dir / "index.jsonl"
+
+    def create_session(self, parent_session_id: str | None = None) -> str:
+        """Create a new session. Returns session_id. Optionally set parent_session_id for branching."""
+        session_id = f"sess_{uuid4().hex[:12]}"
+        row = {
+            "session_id": session_id,
+            "created_at": utcnow_iso(),
+            "traces": [],
+        }
+        if parent_session_id:
+            row["parent_session_id"] = parent_session_id
+        path = self.sessions_dir / f"{session_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(row, ensure_ascii=True, indent=2), encoding="utf-8")
+        self._append_jsonl(self._sessions_index_path(), {"session_id": session_id, "created_at": utcnow_iso()})
+        return session_id
+
+    def link_trace_to_session(
+        self,
+        session_id: str,
+        trace_id: str,
+        parent_trace_id: str | None = None,
+    ) -> None:
+        """Link a trace to a session (and optionally to a parent trace for branching)."""
+        path = self.sessions_dir / f"{session_id}.json"
+        if not path.exists():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        traces = list(data.get("traces", []))
+        entry = {"trace_id": trace_id, "parent_trace_id": parent_trace_id, "at": utcnow_iso()}
+        traces.append(entry)
+        data["traces"] = traces
+        path.write_text(json.dumps(data, ensure_ascii=True, indent=2), encoding="utf-8")
+        self.write_event(
+            trace_id,
+            {"kind": "session_link", "session_id": session_id, "parent_trace_id": parent_trace_id},
+        )
+
+    def list_sessions(self, limit: int = 50) -> list[str]:
+        """List session IDs, most recent first."""
+        path = self._sessions_index_path()
+        if not path.exists():
+            return []
+        rows = self._read_jsonl(path)
+        return [r["session_id"] for r in reversed(rows[-limit:]) if r.get("session_id")]
+
+    def get_session_traces(self, session_id: str) -> list[dict[str, Any]]:
+        """Get trace entries for a session (trace_id, parent_trace_id, at)."""
+        path = self.sessions_dir / f"{session_id}.json"
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return list(data.get("traces", []))
+
+    # --- Queen Memories ---
+
+    def _queen_memories_path(self) -> Path:
+        return self.root_dir / "queen_memories.jsonl"
+
+    def write_queen_memory(
+        self,
+        content: str,
+        source: str = "queen",
+        tags: list[str] | None = None,
+    ) -> str:
+        """Persist a memory entry to queen_memories.jsonl. Returns memory_id."""
+        memory_id = str(uuid4())
+        row: dict[str, Any] = {
+            "memory_id": memory_id,
+            "content": content,
+            "source": source,
+            "tags": tags or [],
+            "created_at": utcnow_iso(),
+        }
+        self._append_jsonl(self._queen_memories_path(), row)
+        # Also index into vector store for semantic recall
+        self.vector_store.upsert(memory_id, content)
+        return memory_id
+
+    def read_queen_memories(
+        self,
+        limit: int = 50,
+        tag: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read persisted Queen memories, most recent first. Optionally filter by tag."""
+        rows = self._read_jsonl(self._queen_memories_path())
+        if tag:
+            rows = [r for r in rows if tag in (r.get("tags") or [])]
+        return list(reversed(rows[-limit:]))
+
+    def compact_traces(
+        self,
+        *,
+        trace_id: str | None = None,
+        all_traces: bool = False,
+        min_age_hours: float = 0,
+    ) -> dict[str, Any]:
+        """Compact trace files. See beehive.trace_compaction.compact_traces."""
+        from .trace_compaction import compact_traces as _compact
+        return _compact(
+            self.root_dir,
+            trace_id=trace_id,
+            all_traces=all_traces,
+            min_age_hours=min_age_hours,
+        )
+
+    def get_trace_tree(self, trace_id: str) -> dict[str, Any]:
+        """Get trace with its children (from session links). Returns {trace_id, parent_trace_id, children: [...]}."""
+        events = self.read_events(trace_id)
+        parent_trace_id: str | None = None
+        session_id: str | None = None
+        for ev in events:
+            if ev.get("kind") == "session_link":
+                parent_trace_id = ev.get("parent_trace_id")
+                session_id = ev.get("session_id")
+                break
+        children: list[dict[str, Any]] = []
+        if session_id:
+            for entry in self.get_session_traces(session_id):
+                if entry.get("parent_trace_id") == trace_id:
+                    children.append(self.get_trace_tree(entry["trace_id"]))
+        return {
+            "trace_id": trace_id,
+            "parent_trace_id": parent_trace_id,
+            "session_id": session_id,
+            "children": children,
+        }

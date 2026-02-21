@@ -7,16 +7,20 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Callable
 from uuid import uuid4
 
 from pydantic import BaseModel
 
+from .plugins import load_worker_plugins
 from .contracts import (
     AgentIdentity,
+    AbilitiesProfile,
+    AccountabilityPolicy,
     AuditFinding,
     AuditOutput,
     CostMetrics,
+    GuardrailProfile,
     HeavyComputeOutput,
     ResultEnvelope,
     RuleProfile,
@@ -29,6 +33,7 @@ from .contracts import (
     WorkerKind,
 )
 from .honeycomb import HoneycombConfig, HoneycombStore
+from .llm_provider import LLMRouter, build_llm_router
 from .tracing import Tracer
 from .web_adapters import SearxngAdapter, WebAdapterError
 
@@ -43,11 +48,23 @@ class WorkerContext:
     skill: SkillProfile
     rule: RuleProfile
     soul: SoulProfile
+    abilities: AbilitiesProfile | None = None
+    accountability: AccountabilityPolicy | None = None
+    guardrails: GuardrailProfile | None = None
+    status_callback: Callable[[str], None] | None = None
 
 
 class BaseSpecialistWorker:
     worker_kind: WorkerKind
     output_model: type[BaseModel]
+
+    @staticmethod
+    def _emit_status(context: WorkerContext, msg: str) -> None:
+        if context.status_callback:
+            try:
+                context.status_callback(msg)
+            except Exception:
+                pass
 
     def preflight(self, task: TaskEnvelope, context: WorkerContext) -> None:
         if task.worker_kind != self.worker_kind:
@@ -69,88 +86,94 @@ class WebSearchWorker(BaseSpecialistWorker):
     
     def __init__(
         self,
-        llm_provider: str,
-        ollama_base_url: str,
-        ollama_model: str,
+        llm_provider: str = "ollama",
+        llm_providers: str | None = None,
+        ollama_base_url: str = "http://100.99.106.59:11434",
+        ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
         ollama_timeout_seconds: int = 120,
         gemini_api_key: str = "",
         gemini_model: str = "gemini-1.5-flash",
         gemini_timeout_seconds: int = 120,
+        openai_api_key: str = "",
+        openai_model: str = "gpt-4o-mini",
+        openai_base_url: str | None = None,
+        openai_timeout_seconds: int = 120,
         searxng_base_url: str = "http://localhost:8080",
     ) -> None:
-        self.llm_provider = llm_provider.strip().lower()
-        self.ollama_base_url = ollama_base_url.rstrip("/")
-        self.ollama_model = ollama_model
-        self.ollama_timeout_seconds = max(5, int(ollama_timeout_seconds))
-        self.gemini_api_key = gemini_api_key.strip()
-        self.gemini_model = gemini_model
-        self.gemini_timeout_seconds = max(5, int(gemini_timeout_seconds))
+        self.llm_provider = (llm_provider or "ollama").strip().lower()
+        self.llm_router = build_llm_router(
+            llm_providers=llm_providers,
+            ollama_base_url=ollama_base_url,
+            ollama_model=ollama_model,
+            ollama_timeout_seconds=ollama_timeout_seconds,
+            gemini_api_key=gemini_api_key,
+            gemini_model=gemini_model,
+            gemini_timeout_seconds=gemini_timeout_seconds,
+            openai_api_key=openai_api_key,
+            openai_model=openai_model,
+            openai_base_url=openai_base_url,
+            openai_timeout_seconds=openai_timeout_seconds,
+        )
         self.searxng = SearxngAdapter(base_url=searxng_base_url)
 
-    def _ollama_reply(self, query: str) -> tuple[str | None, Literal["ollama", "fallback"]]:
-        url = f"{self.ollama_base_url}/api/generate"
-        payload = {
-            "model": self.ollama_model,
-            "prompt": query,
-            "stream": False,
-        }
-        req = urllib.request.Request(
-            url=url,
-            method="POST",
-            headers={"Content-Type": "application/json"},
-            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+    def _assistant_reply(
+        self,
+        query: str,
+        system: str | None = None,
+        messages: list[dict[str, str]] | None = None,
+        model_tier: str | None = None,
+        model_override: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Call LLM via router with fallback. model_override takes precedence; model_tier selects economy/standard/premium. Returns (text, source)."""
+        return self.llm_router.call(
+            prompt=query,
+            system=system,
+            messages=messages,
+            model_tier=model_tier,
+            model_override=model_override,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.ollama_timeout_seconds) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-            text = str(raw.get("response", "")).strip()
-            if text:
-                return text, "ollama"
-        except Exception:
-            return None, "fallback"
-        return None, "fallback"
-
-    def _gemini_reply(self, query: str) -> tuple[str | None, Literal["gemini", "fallback"]]:
-        if not self.gemini_api_key:
-            return None, "fallback"
-        model = urllib.parse.quote(self.gemini_model, safe=":")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_api_key}"
-        payload = {
-            "contents": [{"parts": [{"text": query}]}],
-            "generationConfig": {"temperature": 0.5},
-        }
-        req = urllib.request.Request(
-            url=url,
-            method="POST",
-            headers={"Content-Type": "application/json"},
-            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.gemini_timeout_seconds) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-            candidates = raw.get("candidates", [])
-            if isinstance(candidates, list) and candidates:
-                content = candidates[0].get("content", {})
-                parts = content.get("parts", [])
-                if isinstance(parts, list):
-                    text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)).strip()
-                    if text:
-                        return text, "gemini"
-        except Exception:
-            return None, "fallback"
-        return None, "fallback"
-
-    def _assistant_reply(self, query: str) -> tuple[str | None, Literal["ollama", "gemini", "fallback"]]:
-        if self.llm_provider == "gemini":
-            return self._gemini_reply(query)
-        return self._ollama_reply(query)
 
     def _domain_from_url(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         return (parsed.hostname or "").lower()
 
+    def _user_context_system(self, payload: dict[str, Any]) -> str | None:
+        """Build system prompt from user memories if present."""
+        memories = payload.get("user_memories") or []
+        if not isinstance(memories, list) or not memories:
+            return None
+        lines = []
+        for m in memories[:15]:
+            if isinstance(m, str):
+                lines.append(f"- {m}")
+            elif isinstance(m, dict) and m.get("content"):
+                lines.append(f"- {m['content']}")
+        if not lines:
+            return None
+        return "User context from past conversations:\n" + "\n".join(lines)
+
     def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
         query = str(task.payload.get("query") or task.payload.get("topic") or task.task_type).strip()
+        use_web_search = task.payload.get("use_web_search", False) is True
+        user_system = self._user_context_system(task.payload)
+        if not use_web_search:
+            self._emit_status(context, "Consulting language model for response generation…")
+            model_tier = task.payload.get("model_tier")
+            assistant_reply, source = self._assistant_reply(
+                query, system=user_system, model_tier=model_tier
+            )
+            if assistant_reply is None:
+                assistant_reply = (
+                    "I could not reach any configured LLM. "
+                    "Ensure Ollama is running (BEEHIVE_OLLAMA_BASE_URL) and/or BEEHIVE_GEMINI_API_KEY is set."
+                )
+            return WebSearchOutput(
+                query=query,
+                evidence=[],
+                assistant_reply=assistant_reply,
+                response_source=source,
+                synthesis="Direct chat (Ollama only, no web search).",
+            ).model_dump(mode="json")
         domains = list(task.payload.get("domains", [])) or context.rule.allowed_domains or [
             "docs.python.org",
             "github.com",
@@ -159,6 +182,7 @@ class WebSearchWorker(BaseSpecialistWorker):
         allowed_domains = {str(domain).lower() for domain in domains}
         evidence: list[WebEvidence] = []
         search_error: str | None = None
+        self._emit_status(context, "Querying search index for relevant sources…")
         try:
             rows = self.searxng.search(query=query, allowed_domains=list(allowed_domains), limit=4)
             fetched_urls: list[str] = []
@@ -176,6 +200,8 @@ class WebSearchWorker(BaseSpecialistWorker):
                         snippet = self.searxng.fetch(url)
                     except WebAdapterError:
                         snippet = f"No snippet available from {domain}."
+                if idx == 0:
+                    self._emit_status(context, "Retrieving source content and extracting snippets…")
                 evidence.append(
                     WebEvidence(
                         title=str(row.get("title", f"{query[:60]} source {idx + 1}")).strip(),
@@ -205,18 +231,16 @@ class WebSearchWorker(BaseSpecialistWorker):
             synthesis += f" SearXNG degraded ({search_error}); fallback evidence used."
         else:
             synthesis += " Primary source: SearXNG."
-        assistant_reply, source = self._assistant_reply(query)
+        self._emit_status(context, "Synthesizing response from gathered evidence…")
+        model_tier = task.payload.get("model_tier")
+        assistant_reply, source = self._assistant_reply(
+            query, system=user_system, model_tier=model_tier
+        )
         if assistant_reply is None:
-            if self.llm_provider == "gemini":
-                assistant_reply = (
-                    f"I could not reach Gemini right now, but I prepared an evidence-backed synthesis for '{query}'. "
-                    "Set BEEHIVE_GEMINI_API_KEY/BEEHIVE_GEMINI_MODEL and ensure API access is available."
-                )
-            else:
-                assistant_reply = (
-                    f"I could not reach Ollama right now, but I prepared an evidence-backed synthesis for '{query}'. "
-                    "Set BEEHIVE_OLLAMA_BASE_URL/BEEHIVE_OLLAMA_MODEL and ensure Ollama is reachable."
-                )
+            assistant_reply = (
+                f"I could not reach any configured LLM, but I prepared an evidence-backed synthesis for '{query}'. "
+                "Ensure Ollama is running (BEEHIVE_OLLAMA_BASE_URL) and/or BEEHIVE_GEMINI_API_KEY is set."
+            )
         return WebSearchOutput(
             query=query,
             evidence=evidence,
@@ -231,7 +255,7 @@ class HeavyComputeWorker(BaseSpecialistWorker):
     output_model = HeavyComputeOutput
 
     def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
-        _ = context
+        self._emit_status(context, "Running computational analysis on numeric inputs…")
         raw_numbers = task.payload.get("numbers", [])
         numbers = [float(value) for value in raw_numbers if isinstance(value, (int, float))]
         if not numbers:
@@ -257,7 +281,7 @@ class AuditWorker(BaseSpecialistWorker):
     output_model = AuditOutput
 
     def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
-        _ = context
+        self._emit_status(context, "Performing audit and validation of prior result…")
         target_task_id = str(task.payload.get("target_task_id", "")).strip()
         target_result = task.payload.get("target_result")
         findings: list[AuditFinding] = []
@@ -293,6 +317,7 @@ class AuditWorker(BaseSpecialistWorker):
 class WorkerRuntime:
     """
     Single-task worker: execute once, persist, terminate.
+    Supports pluggable workers via .honeycomb/workers/plugins.json.
     """
 
     def __init__(
@@ -300,30 +325,60 @@ class WorkerRuntime:
         honeycomb: HoneycombStore,
         tracer: Tracer,
         llm_provider: str = "ollama",
+        llm_providers: str | None = None,
         ollama_base_url: str = "http://100.99.106.59:11434",
         ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
         ollama_timeout_seconds: int = 120,
         gemini_api_key: str = "",
         gemini_model: str = "gemini-1.5-flash",
         gemini_timeout_seconds: int = 120,
+        openai_api_key: str = "",
+        openai_model: str = "gpt-4o-mini",
+        openai_base_url: str | None = None,
+        openai_timeout_seconds: int = 120,
         searxng_base_url: str = "http://localhost:8080",
+        extra_workers: dict[WorkerKind, BaseSpecialistWorker] | None = None,
     ) -> None:
         self.honeycomb = honeycomb
         self.tracer = tracer
         self._workers: dict[WorkerKind, BaseSpecialistWorker] = {
             WorkerKind.web_search: WebSearchWorker(
                 llm_provider=llm_provider,
+                llm_providers=llm_providers,
                 ollama_base_url=ollama_base_url,
                 ollama_model=ollama_model,
                 ollama_timeout_seconds=ollama_timeout_seconds,
                 gemini_api_key=gemini_api_key,
                 gemini_model=gemini_model,
                 gemini_timeout_seconds=gemini_timeout_seconds,
+                openai_api_key=openai_api_key,
+                openai_model=openai_model,
+                openai_base_url=openai_base_url,
+                openai_timeout_seconds=openai_timeout_seconds,
                 searxng_base_url=searxng_base_url,
             ),
             WorkerKind.heavy_compute: HeavyComputeWorker(),
             WorkerKind.audit: AuditWorker(),
         }
+        if extra_workers:
+            for kind, worker in extra_workers.items():
+                self._workers[kind] = worker
+        else:
+            plugin_workers = load_worker_plugins(honeycomb.root_dir)
+            for kind, worker in plugin_workers.items():
+                self._workers[kind] = worker
+
+    def direct_chat(
+        self,
+        query: str,
+        system: str | None = None,
+        messages: list[dict[str, str]] | None = None,
+        model_override: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Call LLM (Ollama/Gemini) directly without any worker pipeline. Returns (reply, source)."""
+        worker = self._workers[WorkerKind.web_search]
+        assert isinstance(worker, WebSearchWorker)
+        return worker._assistant_reply(query, system, messages, model_override=model_override)
 
     def run_once(self, task: TaskEnvelope, context: WorkerContext, parent_span_id: str | None = None) -> ResultEnvelope:
         started = perf_counter()
@@ -406,6 +461,7 @@ def execute_task_serialized(
     vector_collection: str = "honeycomb_memory",
     vector_url: str = "http://localhost:6333",
     llm_provider: str = "ollama",
+    llm_providers: str | None = None,
     ollama_base_url: str = "http://100.99.106.59:11434",
     ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
     ollama_timeout_seconds: int = 120,
@@ -420,6 +476,21 @@ def execute_task_serialized(
         skill=SkillProfile.model_validate(context_payload["skill"]),
         rule=RuleProfile.model_validate(context_payload["rule"]),
         soul=SoulProfile.model_validate(context_payload["soul"]),
+        abilities=(
+            AbilitiesProfile.model_validate(context_payload["abilities"])
+            if isinstance(context_payload.get("abilities"), dict)
+            else None
+        ),
+        accountability=(
+            AccountabilityPolicy.model_validate(context_payload["accountability"])
+            if isinstance(context_payload.get("accountability"), dict)
+            else None
+        ),
+        guardrails=(
+            GuardrailProfile.model_validate(context_payload["guardrails"])
+            if isinstance(context_payload.get("guardrails"), dict)
+            else None
+        ),
     )
     honeycomb = HoneycombStore(
         HoneycombConfig(
@@ -434,6 +505,7 @@ def execute_task_serialized(
         honeycomb,
         tracer,
         llm_provider=llm_provider,
+        llm_providers=llm_providers,
         ollama_base_url=ollama_base_url,
         ollama_model=ollama_model,
         ollama_timeout_seconds=ollama_timeout_seconds,
@@ -442,11 +514,14 @@ def execute_task_serialized(
         gemini_timeout_seconds=gemini_timeout_seconds,
         searxng_base_url=searxng_base_url,
     )
-    if task.worker_kind == WorkerKind.web_search and "web_search" not in context.skill.capabilities:
+    effective_capabilities = set(context.skill.capabilities)
+    if context.abilities is not None:
+        effective_capabilities.update(context.abilities.capabilities)
+    if task.worker_kind == WorkerKind.web_search and "web_search" not in effective_capabilities:
         raise ValueError("context_skill_missing_web_search_capability")
-    if task.worker_kind == WorkerKind.heavy_compute and "compute" not in context.skill.capabilities:
+    if task.worker_kind == WorkerKind.heavy_compute and "compute" not in effective_capabilities:
         raise ValueError("context_skill_missing_compute_capability")
-    if task.worker_kind == WorkerKind.audit and "audit" not in context.skill.capabilities:
+    if task.worker_kind == WorkerKind.audit and "audit" not in effective_capabilities:
         raise ValueError("context_skill_missing_audit_capability")
     result = runtime.run_once(task, context)
     return result.model_dump(mode="json")

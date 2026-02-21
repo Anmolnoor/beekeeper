@@ -15,6 +15,7 @@ vector_backend = os.getenv("BEEHIVE_VECTOR_BACKEND", "memory")
 vector_collection = os.getenv("BEEHIVE_VECTOR_COLLECTION", "honeycomb_memory")
 vector_url = os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333")
 llm_provider = os.getenv("BEEHIVE_LLM_PROVIDER", "ollama")
+llm_providers = os.getenv("BEEHIVE_LLM_PROVIDERS", "") or None
 ollama_base_url = os.getenv("BEEHIVE_OLLAMA_BASE_URL", "http://100.99.106.59:11434")
 ollama_model = os.getenv("BEEHIVE_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b")
 ollama_timeout_seconds = int(os.getenv("BEEHIVE_OLLAMA_TIMEOUT_SECONDS", "120"))
@@ -36,6 +37,7 @@ def execute_worker_task(task_payload: dict[str, Any], context_payload: dict[str,
         vector_collection=vector_collection,
         vector_url=vector_url,
         llm_provider=llm_provider,
+        llm_providers=llm_providers,
         ollama_base_url=ollama_base_url,
         ollama_model=ollama_model,
         ollama_timeout_seconds=ollama_timeout_seconds,

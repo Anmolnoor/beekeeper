@@ -17,16 +17,65 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+def _project_root_for_env() -> Path | None:
+    """Find project root (dir with .env or pyproject.toml) by walking up from cwd or package root."""
+    candidates: list[Path] = []
+    # From package root (works for editable install)
+    pkg_root = Path(__file__).resolve().parent.parent
+    candidates.append(pkg_root)
+    # Walk up from cwd (works when running from subdir or non-editable install)
+    cwd = Path.cwd()
+    for _ in range(20):
+        if (cwd / ".env").exists() or (cwd / "pyproject.toml").exists():
+            candidates.append(cwd)
+            break
+        parent = cwd.parent
+        if parent == cwd:
+            break
+        cwd = parent
+    for d in candidates:
+        env_path = d / ".env"
+        if env_path.exists():
+            return d
+    return None
+
+
+def _load_env_early() -> None:
+    """Load .env from project root before any other config reads."""
+    try:
+        from dotenv import load_dotenv
+        root = _project_root_for_env()
+        if root is not None:
+            load_dotenv(root / ".env")
+        # Also load from cwd so local overrides work (e.g. running from project subdir)
+        cwd_env = Path.cwd() / ".env"
+        if cwd_env.exists():
+            load_dotenv(cwd_env, override=True)
+        if root is None and not cwd_env.exists():
+            load_dotenv()
+    except ImportError:
+        pass
+
 from .honeycomb import HoneycombConfig, HoneycombStore
 from .ops import compute_ops_metrics, send_alert_webhook
+from .package_installer import install_package, list_installed_plugins, uninstall_plugin
+from .worker_registry import WorkerRegistry
+from .trace_compaction import compact_traces
+from .pulse import PulseConfig, run_pulse_loop
 from .queen import QueenAgent, QueenConfig
+from .store import BeekeeperStore
 
 
-def _build_config(args: argparse.Namespace) -> QueenConfig:
-    return QueenConfig(
+def _build_config(
+    args: argparse.Namespace,
+    *,
+    scheduler_override: str | None = None,
+) -> QueenConfig:
+    scheduler = scheduler_override if scheduler_override is not None else getattr(args, "scheduler", "inline")
+    cfg = QueenConfig(
         honeycomb_root=Path(args.honeycomb_root),
         max_reruns=args.max_reruns,
-        scheduler_backend=args.scheduler,
+        scheduler_backend=scheduler,
         celery_broker_url=os.getenv("BEEHIVE_CELERY_BROKER_URL", "redis://localhost:6379/0"),
         celery_backend_url=os.getenv("BEEHIVE_CELERY_BACKEND_URL", "redis://localhost:6379/1"),
         temporal_endpoint=os.getenv("BEEHIVE_TEMPORAL_ENDPOINT", "localhost:7233"),
@@ -44,6 +93,7 @@ def _build_config(args: argparse.Namespace) -> QueenConfig:
         gemini_timeout_seconds=int(os.getenv("BEEHIVE_GEMINI_TIMEOUT_SECONDS", "120")),
         searxng_base_url=os.getenv("BEEHIVE_SEARXNG_BASE_URL", "http://localhost:8080"),
     )
+    return cfg
 
 
 def _parse_payload(payload_text: str | None, query: str | None) -> dict[str, Any]:
@@ -64,11 +114,14 @@ def _extract_primary_response(run_output: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_chat_loop(args: argparse.Namespace) -> int:
-    cfg = _build_config(args)
+    current_scheduler = getattr(args, "scheduler", "inline")
+    model_override: str | None = None
+    cfg = _build_config(args, scheduler_override=current_scheduler)
     queen = QueenAgent(cfg)
     current_intent = args.intent
+    honeycomb_store = HoneycombStore(HoneycombConfig(root_dir=Path(args.honeycomb_root)))
     print("Beehive Queen chat")
-    print("Type your message. Commands: /help, /intent <name>, /exit")
+    print("Type your message. Commands: /help, /intent <name>, /model, /scheduler, /tree, /trace, /exit")
     while True:
         try:
             raw = input("you> ").strip()
@@ -85,8 +138,12 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
             return 0
         if raw == "/help":
             print("Commands:")
-            print("  /intent <name>   set the active Queen intent")
-            print("  /exit            leave chat")
+            print("  /intent <name>      set the active Queen intent")
+            print("  /model [name]       set or show LLM model override")
+            print("  /scheduler [be]     set scheduler (inline|celery|temporal)")
+            print("  /tree [trace_id]    show trace tree")
+            print("  /trace [trace_id]   show trace events and details")
+            print("  /exit               leave chat")
             print("Input mode:")
             print("  plain text       -> sent as payload {'query': <text>}")
             print("  JSON object      -> sent as raw payload")
@@ -98,6 +155,59 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
                 continue
             current_intent = next_intent
             print(f"queen> active intent set to '{current_intent}'")
+            continue
+        if raw.startswith("/model"):
+            rest = raw.replace("/model", "", 1).strip()
+            if rest:
+                model_override = rest
+                print(f"queen> model override set to '{model_override}'")
+            else:
+                print(f"queen> model override: {model_override or '(none)'}")
+            continue
+        if raw.startswith("/scheduler"):
+            rest = raw.replace("/scheduler", "", 1).strip()
+            if rest and rest in ("inline", "celery", "temporal"):
+                current_scheduler = rest
+                cfg = _build_config(args, scheduler_override=current_scheduler)
+                queen = QueenAgent(cfg)
+                print(f"queen> scheduler set to '{current_scheduler}'")
+            elif rest:
+                print("queen> scheduler must be inline, celery, or temporal")
+            else:
+                print(f"queen> scheduler: {current_scheduler}")
+            continue
+        if raw.startswith("/tree"):
+            rest = raw.replace("/tree", "", 1).strip()
+            trace_id = rest
+            if not trace_id:
+                traces = honeycomb_store.list_traces(limit=1)
+                trace_id = traces[0] if traces else ""
+            if not trace_id:
+                print("queen> no trace_id and no recent traces")
+                continue
+            try:
+                tree = honeycomb_store.get_trace_tree(trace_id)
+                print(json.dumps(tree, ensure_ascii=True, indent=2))
+            except Exception as exc:
+                print(f"queen> tree failed: {exc}")
+            continue
+        if raw.startswith("/trace"):
+            rest = raw.replace("/trace", "", 1).strip()
+            trace_id = rest
+            if not trace_id:
+                traces = honeycomb_store.list_traces(limit=1)
+                trace_id = traces[0] if traces else ""
+            if not trace_id:
+                print("queen> no trace_id and no recent traces")
+                continue
+            try:
+                events = honeycomb_store.read_events(trace_id)
+                gov_path = honeycomb_store.governance_dir / f"{trace_id}.jsonl"
+                gov_events = honeycomb_store._read_jsonl(gov_path) if gov_path.exists() else []
+                out = {"trace_id": trace_id, "events": events, "governance": gov_events}
+                print(json.dumps(out, ensure_ascii=True, indent=2))
+            except Exception as exc:
+                print(f"queen> trace failed: {exc}")
             continue
 
         payload: dict[str, Any]
@@ -113,6 +223,8 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
             payload = parsed
         else:
             payload = {"query": raw}
+        if model_override:
+            payload["model_override"] = model_override
 
         try:
             output = queen.run(intent=current_intent, payload=payload)
@@ -254,6 +366,141 @@ def _check_http(
         return DoctorCheck(name=name, ok=False, details=f"error {url} ({exc})")
 
 
+def _check_llm_provider_env() -> DoctorCheck:
+    """Verify LLM provider(s) have required env vars. Considers BEEHIVE_LLM_PROVIDERS and BEEHIVE_LLM_PROVIDER."""
+    providers_str = (os.getenv("BEEHIVE_LLM_PROVIDERS") or "").strip()
+    if not providers_str:
+        providers_str = (os.getenv("BEEHIVE_LLM_PROVIDER") or "ollama").strip()
+    provider_names = [p.strip().lower() for p in providers_str.split(",") if p.strip()]
+    if not provider_names:
+        provider_names = ["ollama"]
+
+    missing: list[str] = []
+    warn_unused: list[str] = []
+    for name in provider_names:
+        if name == "gemini":
+            key = (os.getenv("BEEHIVE_GEMINI_API_KEY") or "").strip()
+            if not key:
+                missing.append("BEEHIVE_GEMINI_API_KEY (required when gemini in providers)")
+            else:
+                pass  # ok
+        elif name == "openai":
+            key = (os.getenv("BEEHIVE_OPENAI_API_KEY") or "").strip()
+            if not key:
+                missing.append("BEEHIVE_OPENAI_API_KEY (required when openai in providers)")
+            else:
+                pass  # ok
+        elif name == "ollama":
+            pass  # no key required
+        else:
+            missing.append(f"unknown provider '{name}'")
+
+    gemini_key = (os.getenv("BEEHIVE_GEMINI_API_KEY") or "").strip()
+    if gemini_key and "gemini" not in provider_names:
+        warn_unused.append("BEEHIVE_GEMINI_API_KEY set but gemini not in providers")
+    openai_key = (os.getenv("BEEHIVE_OPENAI_API_KEY") or "").strip()
+    if openai_key and "openai" not in provider_names:
+        warn_unused.append("BEEHIVE_OPENAI_API_KEY set but openai not in providers")
+
+    if missing:
+        return DoctorCheck(
+            name="llm_provider",
+            ok=False,
+            details="; ".join(missing),
+        )
+    details = f"{','.join(provider_names)} configured"
+    if warn_unused:
+        details += f" (warn: {'; '.join(warn_unused)})"
+    return DoctorCheck(name="llm_provider", ok=True, details=details)
+
+
+def _check_audit_signing_key() -> DoctorCheck:
+    """Flag risky prod setting: missing or default audit signing key."""
+    key = (os.getenv("BEEKEEPER_AUDIT_SIGNING_KEY") or "").strip()
+    if not key:
+        return DoctorCheck(
+            name="audit_signing",
+            ok=False,
+            details="BEEKEEPER_AUDIT_SIGNING_KEY not set; audit logs unsigned (risky for production)",
+        )
+    if "dev" in key.lower() or key == "beekeeper-dev-signing-key":
+        return DoctorCheck(
+            name="audit_signing",
+            ok=True,
+            details="audit signing key set (dev default; consider changing for production)",
+        )
+    return DoctorCheck(name="audit_signing", ok=True, details="audit signing key set")
+
+
+def _check_risky_settings() -> DoctorCheck:
+    """Summarize risky settings (dev defaults that should change for production)."""
+    risks: list[str] = []
+    key = (os.getenv("BEEKEEPER_AUDIT_SIGNING_KEY") or "").strip()
+    if key and ("dev" in key.lower() or key == "beekeeper-dev-signing-key"):
+        risks.append("BEEKEEPER_AUDIT_SIGNING_KEY uses dev default")
+    if not risks:
+        return DoctorCheck(name="risky_settings", ok=True, details="no risky dev defaults detected")
+    return DoctorCheck(
+        name="risky_settings",
+        ok=True,
+        details="; ".join(risks) + " (consider changing for production)",
+    )
+
+
+def _check_celery_broker() -> DoctorCheck:
+    """Optional: verify Celery can connect to broker (same as redis check for default)."""
+    broker_url = os.getenv("BEEHIVE_CELERY_BROKER_URL", "redis://localhost:6379/0")
+    redis_host, redis_port = _parse_host_port_from_url(broker_url, default_port=6379)
+    return _check_tcp("celery_broker", redis_host, redis_port)
+
+
+_CHANNEL_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "whatsapp": ["whatsapp_access_token", "whatsapp_phone_number_id"],
+    "slack": ["slack_bot_token"],
+    "telegram": ["telegram_bot_token"],
+    "discord": ["discord_bot_token"],
+}
+
+
+def _validate_channel_config(channel: str, config: dict[str, Any]) -> list[str]:
+    """Return list of missing required field names for this channel config."""
+    required = _CHANNEL_REQUIRED_FIELDS.get(channel, [])
+    missing = [f for f in required if not (config.get(f) or "").strip()]
+    return missing
+
+
+def _check_channel_configs() -> DoctorCheck:
+    """Validate channel configs: verify store is reachable, list channels, and validate required fields."""
+    try:
+        store = _get_beekeeper_store()
+        configs = store.list_channel_configs()
+        channel_names = [c.get("channel", "?") for c in configs]
+        invalid: list[str] = []
+        for c in configs:
+            ch = c.get("channel", "")
+            if not ch:
+                continue
+            decrypted = store.get_channel_config_decrypted(ch) or {}
+            missing = _validate_channel_config(ch, decrypted)
+            if missing:
+                invalid.append(f"{ch}(missing: {','.join(missing)})")
+        if invalid:
+            return DoctorCheck(
+                name="channels",
+                ok=False,
+                details=f"channel(s) with invalid config: {'; '.join(invalid)}",
+            )
+        if channel_names:
+            return DoctorCheck(
+                name="channels",
+                ok=True,
+                details=f"{len(configs)} channel(s): {', '.join(channel_names)}",
+            )
+        return DoctorCheck(name="channels", ok=True, details="no channels configured (optional)")
+    except Exception as exc:
+        return DoctorCheck(name="channels", ok=False, details=f"store error: {exc}")
+
+
 def _collect_doctor_checks() -> list[DoctorCheck]:
     broker_url = os.getenv("BEEHIVE_CELERY_BROKER_URL", "redis://localhost:6379/0")
     temporal_endpoint = os.getenv("BEEHIVE_TEMPORAL_ENDPOINT", "localhost:7233")
@@ -268,13 +515,19 @@ def _collect_doctor_checks() -> list[DoctorCheck]:
     else:
         temporal_host, temporal_port = temporal_endpoint, 7233
 
-    return [
+    checks = [
         _check_tcp("redis", redis_host, redis_port),
         _check_tcp("temporal", temporal_host, temporal_port),
         _check_http("qdrant", vector_url.rstrip("/") + "/readyz"),
         _check_http("ollama", ollama_url.rstrip("/") + "/api/tags"),
         _check_http("searxng", searxng_url.rstrip("/") + "/", tolerated_error_codes=(403,)),
+        _check_llm_provider_env(),
+        _check_audit_signing_key(),
+        _check_risky_settings(),
+        _check_celery_broker(),
+        _check_channel_configs(),
     ]
+    return checks
 
 
 def _print_doctor_checks(checks: list[DoctorCheck]) -> None:
@@ -283,10 +536,26 @@ def _print_doctor_checks(checks: list[DoctorCheck]) -> None:
         print(f"[{status}] {check.name}: {check.details}")
 
 
-def _run_doctor(auto_start: bool = False) -> int:
+def _doctor_checks_to_json(checks: list[DoctorCheck]) -> dict[str, Any]:
+    """Serialize doctor checks for --json output."""
+    return {
+        "checks": [{"name": c.name, "ok": c.ok, "details": c.details} for c in checks],
+        "passed": sum(1 for c in checks if c.ok),
+        "failed": sum(1 for c in checks if not c.ok),
+        "all_passed": all(c.ok for c in checks),
+    }
+
+
+def _run_doctor(auto_start: bool = False, json_output: bool = False) -> int:
     checks = _collect_doctor_checks()
-    _print_doctor_checks(checks)
     failed = [check for check in checks if not check.ok]
+
+    if json_output:
+        payload = _doctor_checks_to_json(checks)
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return 0 if not failed else 1
+
+    _print_doctor_checks(checks)
     if not failed:
         print(f"doctor summary: all {len(checks)} checks passed")
         return 0
@@ -307,6 +576,274 @@ def _run_doctor(auto_start: bool = False) -> int:
     return 0
 
 
+def _update_env_key(project_root: Path, key: str, value: str) -> None:
+    """Update or append KEY=value in .env file."""
+    env_path = project_root / ".env"
+    if not env_path.exists():
+        return
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    new_line = f"{key}={value}"
+    updated = False
+    for i, line in enumerate(lines):
+        if line.startswith(f"{key}=") or (line.strip().startswith(f"{key}=")):
+            lines[i] = new_line
+            updated = True
+            break
+    if not updated:
+        lines.append(new_line)
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _ensure_env_file(project_root: Path, non_interactive: bool) -> bool:
+    """Copy .env.example to .env if .env does not exist. Returns True if .env exists or was created."""
+    env_path = project_root / ".env"
+    example_path = project_root / ".env.example"
+    if env_path.exists():
+        return True
+    if not example_path.exists():
+        return False
+    shutil.copy2(example_path, env_path)
+    print(f"[OK] Created .env from .env.example. Edit {env_path} to add API keys (BEEHIVE_GEMINI_API_KEY, BEEHIVE_OPENAI_API_KEY, etc.).")
+    if not non_interactive:
+        input("Press Enter to continue...")
+    return True
+
+
+def _run_quickstart(non_interactive: bool = False) -> int:
+    """Short 5-minute path: .env, doctor, init-tenant with defaults."""
+    print("Beehive Quickstart")
+    print("=" * 40)
+    project_root = _project_root()
+    _ensure_env_file(project_root, non_interactive=True)
+    _load_env_early()
+    print("\nStep 1: Checking runtime health...")
+    exit_code = _run_doctor(auto_start=not non_interactive, json_output=False)
+    if exit_code != 0 and non_interactive:
+        print("[WARN] Some health checks failed. Continuing with quickstart.")
+    elif exit_code != 0:
+        print("\n[FAIL] Fix the issues above and run `beehive quickstart` again.")
+        return 1
+    else:
+        print("[OK] Health checks passed.\n")
+
+    store = _get_beekeeper_store()
+    orgs = store.list_orgs()
+    if orgs:
+        print("[OK] Tenant already initialized.")
+    else:
+        print("Step 2: Initializing tenant...")
+        org = store.create_org("Default Organization")
+        hive = store.create_hive(org.org_id, "Main Hive")
+        comb = store.create_honeycomb(hive.hive_id, "Main Hive-comb", ".honeycomb")
+        store.create_queen(hive.hive_id, "Main Queen", "blueprint.queen.default")
+        print(json.dumps({
+            "org": org.model_dump(mode="json"),
+            "hive": hive.model_dump(mode="json"),
+            "honeycomb": comb.model_dump(mode="json"),
+        }, ensure_ascii=True, indent=2))
+        print("[OK] Tenant initialized.\n")
+
+    print("Quickstart complete. Run `beehive chat` to start, or `beehive run --query \"hello\"` to try.")
+    return 0
+
+
+def _run_setup_wizard(non_interactive: bool = False) -> int:
+    """Interactive first-time setup: .env copy, doctor, init-tenant, LLM provider, optional channels, admin."""
+    print("Beehive Setup Wizard")
+    print("=" * 40)
+    project_root = _project_root()
+    _ensure_env_file(project_root, non_interactive)
+    _load_env_early()
+    print("\nStep 1: Checking runtime health...")
+    exit_code = _run_doctor(auto_start=True, json_output=False)
+    if exit_code != 0:
+        print("\n[FAIL] Some health checks failed. Fix the issues above and run `beehive setup` again.")
+        return 1
+    print("\n[OK] All health checks passed.\n")
+
+    store = _get_beekeeper_store()
+    orgs = store.list_orgs()
+    if orgs and non_interactive:
+        print("Org/hive already initialized. Use `beehive onboard` to add a Queen to an existing hive.")
+        return 0
+
+    if orgs:
+        print("Existing org(s) found. You can:")
+        print("  - Run `beehive onboard` to add a Queen to an existing hive")
+        print("  - Run `beehive init-tenant --org X --hive Y` to create another org/hive")
+        return 0
+
+    if non_interactive:
+        org_name = "Default Organization"
+        hive_name = "Main Hive"
+        honeycomb_root = ".honeycomb"
+        llm_provider = "ollama"
+    else:
+        print("Step 2: First-time tenant setup")
+        org_name = input("Organization name [Default Organization]: ").strip() or "Default Organization"
+        hive_name = input("Hive name [Main Hive]: ").strip() or "Main Hive"
+        honeycomb_root = input("Honeycomb root path [.honeycomb]: ").strip() or ".honeycomb"
+        print("LLM provider: ollama (local), gemini, openai, or comma-separated for fallback (e.g. ollama,gemini)")
+        llm_choice = input("LLM provider(s) [ollama]: ").strip().lower() or "ollama"
+        llm_provider = llm_choice
+        _update_env_key(project_root, "BEEHIVE_LLM_PROVIDERS", llm_provider)
+        if "gemini" in llm_provider or "openai" in llm_provider:
+            print("  Ensure BEEHIVE_GEMINI_API_KEY and/or BEEHIVE_OPENAI_API_KEY are set in .env")
+        channel_choice = input("Configure channels now? [y/N]: ").strip().lower()
+        if channel_choice in ("y", "yes"):
+            print("  Run `beehive channels set <channel> <json>` after setup. See .env.example for WhatsApp/Slack vars.")
+
+    org = store.create_org(org_name)
+    hive = store.create_hive(org.org_id, hive_name)
+    comb = store.create_honeycomb(hive.hive_id, f"{hive_name}-comb", honeycomb_root)
+    store.create_queen(hive.hive_id, "Main Queen", "blueprint.queen.default")
+
+    print("\n[OK] Tenant initialized:")
+    print(json.dumps({
+        "org": org.model_dump(mode="json"),
+        "hive": hive.model_dump(mode="json"),
+        "honeycomb": comb.model_dump(mode="json"),
+    }, ensure_ascii=True, indent=2))
+
+    if not non_interactive:
+        create_admin = input("\nCreate admin user? [y/N]: ").strip().lower()
+        if create_admin in ("y", "yes"):
+            try:
+                from beekeeper_api.auth import hash_password
+            except ImportError:
+                hash_password = None
+            if hash_password:
+                email = input("Admin email: ").strip()
+                password = input("Admin password: ").strip()
+                if email and password:
+                    existing = store.get_user_by_email(email)
+                    if existing:
+                        print("[WARN] Email already registered. Skipping admin creation.")
+                    else:
+                        user = store.create_user(email, hash_password(password))
+                        store.assign_org_role(user.user_id, org.org_id, "admin")
+                        print(f"[OK] Admin user created: {email}")
+                else:
+                    print("[WARN] Email/password empty. Skipping admin creation.")
+            else:
+                print("[WARN] beekeeper_api not installed. Skipping admin creation.")
+
+    print("\nSetup complete. Run `beehive run --query \"your question\"` to try the Queen.")
+    return 0
+
+
+def _run_onboard_wizard(non_interactive: bool = False) -> int:
+    """Onboard a Queen into an existing hive (or create org/hive if none exist)."""
+    print("Beehive Onboard")
+    print("=" * 40)
+    store = _get_beekeeper_store()
+    orgs = store.list_orgs()
+    if not orgs:
+        print("No orgs found. Run `beehive setup` first for first-time setup.")
+        return 1
+
+    if non_interactive:
+        org = orgs[0]
+        hives = store.list_hives(org.org_id)
+        hive = hives[0] if hives else None
+        if not hive:
+            hive = store.create_hive(org.org_id, "Main Hive")
+        queen_name = "Main Queen"
+        blueprint_id = "blueprint.queen.default"
+    else:
+        print("Select organization:")
+        for i, o in enumerate(orgs, 1):
+            print(f"  {i}. {o.name} ({o.org_id})")
+        idx = input("Number [1]: ").strip() or "1"
+        try:
+            org = orgs[int(idx) - 1]
+        except (ValueError, IndexError):
+            org = orgs[0]
+        hives = store.list_hives(org.org_id)
+        if not hives:
+            hive_name = input("No hives. Create hive name [Main Hive]: ").strip() or "Main Hive"
+            hive = store.create_hive(org.org_id, hive_name)
+        else:
+            print("Select hive:")
+            for i, h in enumerate(hives, 1):
+                print(f"  {i}. {h.name} ({h.hive_id})")
+            hidx = input(f"Number [1]: ").strip() or "1"
+            try:
+                hive = hives[int(hidx) - 1]
+            except (ValueError, IndexError):
+                hive = hives[0]
+        queen_name = input("Queen name [Main Queen]: ").strip() or "Main Queen"
+        blueprint_id = input("Blueprint ID [blueprint.queen.default]: ").strip() or "blueprint.queen.default"
+
+    queen = store.create_queen(hive.hive_id, queen_name, blueprint_id)
+    print("\n[OK] Queen onboarded:")
+    print(json.dumps({"queen": queen.model_dump(mode="json")}, ensure_ascii=True, indent=2))
+    return 0
+
+
+def _run_shell(honeycomb_root: str = ".honeycomb") -> int:
+    """Interactive shell with command discovery."""
+    print("Beehive Shell")
+    print("=" * 40)
+    print("Type a command or 'help' for options. 'exit' to quit.")
+    print()
+    while True:
+        try:
+            raw = input("beehive> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nbye")
+            return 0
+        if not raw:
+            continue
+        if raw in {"exit", "quit", "q"}:
+            print("bye")
+            return 0
+        if raw in {"help", "?"}:
+            _print_command_guide()
+            continue
+        if raw == "commands":
+            _run_commands_list()
+            continue
+        # Run as subprocess for full arg support
+        cmd = [sys.executable, "-m", "beehive.runner"] + shlex.split(raw)
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print(f"[exit code {result.returncode}]")
+        print()
+    return 0
+
+
+def _run_commands_list() -> None:
+    """List all commands with short descriptions."""
+    cmds = [
+        ("run", "Run a Queen request (--query, --payload)"),
+        ("chat", "Interactive Queen chat"),
+        ("doctor", "Health checks (--auto-start)"),
+        ("up", "Start Docker services (--with-workers, --with-open-webui)"),
+        ("down", "Stop Docker services"),
+        ("ps", "Show container status"),
+        ("restart", "Restart all services"),
+        ("reload", "Reload queen-api"),
+        ("rebuild", "Rebuild images (--core, --api, --all)"),
+        ("setup", "First-time setup wizard"),
+        ("onboard", "Onboard Queen to hive"),
+        ("init-tenant", "Create org/hive"),
+        ("install", "Install worker/guardrail package"),
+        ("traces compact", "Compact trace files"),
+        ("sessions", "Session tree (list, create, traces, tree)"),
+        ("review", "Human approval (list, approve, reject)"),
+        ("metrics", "Telemetry metrics"),
+        ("settings", "Manage settings"),
+        ("channels", "Channel configs"),
+        ("templates", "Agent templates"),
+        ("version", "Show version"),
+        ("update", "Upgrade beehive package"),
+    ]
+    print("Commands:")
+    for name, desc in cmds:
+        print(f"  beehive {name:<20} {desc}")
+
+
 def _print_command_guide() -> None:
     print("\nBeehive command guide:")
     print(textwrap.dedent("""\
@@ -316,20 +853,58 @@ def _print_command_guide() -> None:
           Runs health checks for redis, temporal, qdrant, ollama, and searxng.
       - beehive up [--with-workers]
           Starts required infra containers; optionally starts worker containers too.
+      - beehive up --with-open-webui
+          Starts infra plus queen-api and Open WebUI for chat.
       - beehive review list|approve|reject
           Lists and resolves human-approval queue entries.
       - beehive metrics [--webhook-url URL]
           Prints honeycomb telemetry metrics and emits alert webhook if requested.
       - beehive down
           Stops Beehive containers from docker-compose.
+      - beehive restart
+          Restarts all containers (core, workers, beekeeper-api).
+      - beehive reload
+          Restarts beekeeper-api to pick up config changes.
+      - beehive rebuild [--core] [--api] [--all]
+          Rebuilds images with latest code and restarts. --core=workers, --api=queen-api.
+      - beehive reset [--core] [--api] [--all]
+          Same as rebuild.
       - beehive ps
           Shows Beehive container status.
       - beehive run --scheduler <inline|celery|temporal> --vector <memory|qdrant> --query "<text>"
           Runs one Queen request through the selected scheduler/vector backend.
       - beehive chat --scheduler <inline|celery|temporal> --vector <memory|qdrant>
           Starts an interactive Queen chat in your terminal.
+      - beehive pulse [--interval 2] [--honeycomb-root .honeycomb]
+          Runs Pulse tick loop for Queen autonomy (cron jobs, backlog, analyzers).
       - beehive --help
           Shows all options.
+      - beehive setup [--non-interactive]
+          First-time setup wizard: doctor, init tenant, optional admin user.
+      - beehive onboard [--non-interactive]
+          Onboard a Queen into an existing hive (or create org/hive if none).
+      - beehive init-tenant --org "Acme" --hive "Ops"
+          Initializes a first org/hive/honeycomb for Beekeeper.
+      - beehive settings list|get|set
+          Manage settings via CLI.
+      - beehive channels list|set
+          Manage channel configs (Slack, Telegram, Discord).
+      - beehive templates list|instantiate
+          List or instantiate agent templates.
+      - beehive sessions list|create|traces|tree
+          Session tree and branching (list sessions, create, traces in session, trace tree).
+      - beehive install <package> [--editable] [--no-registry]
+          Install worker/guardrail package from PyPI; registers in .honeycomb/workers|guardrails.
+      - beehive traces compact [--trace-id X] [--all] [--min-age-hours N]
+          Compact trace files to reduce size.
+      - beehive shell
+          Interactive shell with command discovery.
+      - beehive commands
+          List all commands.
+      - beehive version
+          Show version.
+      - beehive update
+          Upgrade beehive package (pip install --upgrade).
     """).rstrip())
 
 
@@ -342,6 +917,35 @@ def _compose_cmd_for_display(args: list[str]) -> list[str]:
     if not compose_cmd:
         return ["docker", "compose", "-f", str(_compose_file()), *args]
     return [*compose_cmd, "-f", str(_compose_file()), *args]
+
+
+def _run_rebuild(args: argparse.Namespace) -> int:
+    core = args.core or args.all
+    api = args.api or args.dashboard or args.all
+    if not core and not api:
+        core = api = True
+    services: list[str] = []
+    if core:
+        services.extend(["celery-worker", "temporal-worker"])
+    if api:
+        services.extend(["queen-api"])
+    build_cmd = _compose_cmd_for_display(["build", "--no-cache", *services])
+    up_cmd = _compose_cmd_for_display(["up", "-d", "--force-recreate", *services])
+    print("$ " + " ".join(shlex.quote(p) for p in build_cmd))
+    try:
+        result = _run_compose(["build", "--no-cache", *services])
+        if result.returncode != 0:
+            return result.returncode
+    except RuntimeError as exc:
+        print(f"[FAIL] compose: {exc}")
+        return 1
+    print("$ " + " ".join(shlex.quote(p) for p in up_cmd))
+    try:
+        result = _run_compose(["up", "-d", "--force-recreate", *services])
+    except RuntimeError as exc:
+        print(f"[FAIL] compose: {exc}")
+        return 1
+    return result.returncode
 
 
 def _build_store(honeycomb_root: str) -> HoneycombStore:
@@ -393,7 +997,159 @@ def _run_metrics_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _get_beekeeper_store() -> BeekeeperStore:
+    root = Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store"))
+    return BeekeeperStore(root)
+
+
+def _run_list_workers(args: argparse.Namespace) -> None:
+    """List built-in and installed workers."""
+    honeycomb_root = Path(getattr(args, "honeycomb_root", ".honeycomb"))
+    registry = WorkerRegistry(honeycomb_root)
+    builtin = {w.get("worker_kind"): w for w in registry.list_workers()}
+    plugins_data = list_installed_plugins(honeycomb_root)
+    plugin_workers = plugins_data.get("workers", [])
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for w in plugin_workers:
+        kind = w.get("worker_kind", "custom")
+        if kind in seen:
+            continue
+        seen.add(kind)
+        reg = builtin.get(kind, {})
+        rows.append({
+            "worker_kind": kind,
+            "name": w.get("name") or reg.get("name", kind),
+            "source": "plugin",
+            "module_path": f"{w.get('module_path', '')}:{w.get('class_name', '')}",
+        })
+    for kind, w in builtin.items():
+        if kind in seen:
+            continue
+        seen.add(kind)
+        rows.append({
+            "worker_kind": kind,
+            "name": w.get("name", kind),
+            "source": "built-in",
+            "module_path": None,
+        })
+    if getattr(args, "json", False):
+        print(json.dumps({"workers": rows}, ensure_ascii=True, indent=2))
+        return
+    if not rows:
+        print("No workers found.")
+        return
+    col1 = max(len(r["worker_kind"]) for r in rows)
+    col2 = max(len(r["name"]) for r in rows)
+    col4 = max(len(str(r["module_path"]) or "-") for r in rows)
+    fmt = f"{{:<{col1}}} {{:<{col2}}} {{:<9}} {{}}"
+    print(fmt.format("worker_kind", "name", "source", "module_path"))
+    print("-" * (col1 + col2 + 9 + col4 + 4))
+    for r in rows:
+        print(fmt.format(r["worker_kind"], r["name"], r["source"], (r["module_path"] or "-")))
+
+
+def _run_settings_command(args: argparse.Namespace) -> int:
+    store = _get_beekeeper_store()
+    if args.settings_command == "list":
+        settings = store.list_settings()
+        print(json.dumps({"settings": settings}, ensure_ascii=True, indent=2))
+        return 0
+    if args.settings_command == "get":
+        val = store.read_setting(args.key)
+        print(json.dumps({"key": args.key, "value": val}, ensure_ascii=True, indent=2))
+        return 0
+    if args.settings_command == "set":
+        raw = (args.json_value or "").strip()
+        if args.key == "llm_model" and raw and not raw.startswith(("{", "[", '"')):
+            value = raw
+        else:
+            try:
+                value = json.loads(args.json_value)
+            except json.JSONDecodeError as exc:
+                print(f"[FAIL] invalid JSON: {exc}", file=sys.stderr)
+                return 1
+        hive_id = getattr(args, "hive_id", None)
+        if hive_id:
+            store.write_hive_setting(hive_id, args.key, value)
+            print(json.dumps({"ok": True, "key": args.key, "hive_id": hive_id}, ensure_ascii=True, indent=2))
+        else:
+            store.write_setting(args.key, value)
+            print(json.dumps({"ok": True, "key": args.key}, ensure_ascii=True, indent=2))
+        return 0
+    return 1
+
+
+def _run_channels_command(args: argparse.Namespace) -> int:
+    store = _get_beekeeper_store()
+    if args.channels_command == "list":
+        configs = store.list_channel_configs()
+        print(json.dumps({"channels": configs}, ensure_ascii=True, indent=2))
+        return 0
+    if args.channels_command == "set":
+        try:
+            payload = json.loads(args.json_value)
+        except json.JSONDecodeError as exc:
+            print(f"[FAIL] invalid JSON: {exc}", file=sys.stderr)
+            return 1
+        store.write_channel_config(args.channel, payload)
+        print(json.dumps({"ok": True, "channel": args.channel}, ensure_ascii=True, indent=2))
+        return 0
+    return 1
+
+
+def _run_sessions_command(args: argparse.Namespace) -> int:
+    store = _build_store(getattr(args, "honeycomb_root", ".honeycomb"))
+    cmd = getattr(args, "sessions_command", None)
+    if cmd == "list":
+        sessions = store.list_sessions(limit=50)
+        print(json.dumps({"sessions": sessions}, ensure_ascii=True, indent=2))
+        return 0
+    if cmd == "create":
+        session_id = store.create_session()
+        print(json.dumps({"session_id": session_id}, ensure_ascii=True, indent=2))
+        return 0
+    if cmd == "traces":
+        session_id = getattr(args, "session_id", None)
+        if not session_id:
+            print("[FAIL] session_id required", file=sys.stderr)
+            return 1
+        traces = store.get_session_traces(session_id)
+        print(json.dumps({"session_id": session_id, "traces": traces}, ensure_ascii=True, indent=2))
+        return 0
+    if cmd == "tree":
+        trace_id = getattr(args, "trace_id", None)
+        if not trace_id:
+            print("[FAIL] trace_id required", file=sys.stderr)
+            return 1
+        tree = store.get_trace_tree(trace_id)
+        print(json.dumps(tree, ensure_ascii=True, indent=2))
+        return 0
+    return 1
+
+
+def _run_templates_command(args: argparse.Namespace) -> int:
+    store = _get_beekeeper_store()
+    if args.templates_command == "list":
+        templates = store.list_templates()
+        print(json.dumps({"templates": templates}, ensure_ascii=True, indent=2))
+        return 0
+    if args.templates_command == "instantiate":
+        templates = {row.get("template_id"): row for row in store.list_templates()}
+        template = templates.get(args.template_id)
+        if template is None:
+            print(f"[FAIL] template not found: {args.template_id}", file=sys.stderr)
+            return 1
+        blueprint_payload = template.get("blueprint", {})
+        blueprint_id = str(blueprint_payload.get("blueprint_id", "blueprint.queen.default"))
+        queen = store.create_queen(args.hive_id, args.name, blueprint_id)
+        print(json.dumps({"queen": queen.model_dump(mode="json"), "template_id": args.template_id}, ensure_ascii=True, indent=2))
+        return 0
+    return 1
+
+
 def main() -> None:
+    _load_env_early()
     parser = argparse.ArgumentParser(prog="beehive", description="Beehive runtime CLI")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -419,6 +1175,12 @@ def main() -> None:
         action="store_true",
         help="Attempt to start Docker infra (redis/temporal/qdrant) if checks fail.",
     )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="doctor_json",
+        help="Output checks as JSON for scripting.",
+    )
 
     up_parser = subparsers.add_parser("up", help="Start docker compose services")
     up_parser.add_argument(
@@ -426,12 +1188,55 @@ def main() -> None:
         action="store_true",
         help="Also start celery-worker and temporal-worker containers.",
     )
+    up_parser.add_argument(
+        "--with-open-webui",
+        action="store_true",
+        help="Also start queen-api and open-webui for chat (Queen via Open WebUI).",
+    )
 
     subparsers.add_parser("down", help="Stop docker compose services")
     subparsers.add_parser("ps", help="Show docker compose service status")
+    restart_parser = subparsers.add_parser(
+        "restart",
+        help="Restart all docker compose services (core, workers, queen-api, open-webui).",
+    )
+    reload_parser = subparsers.add_parser(
+        "reload",
+        help="Reload beehive: restart queen-api (picks up config changes). Use 'restart' for full reset.",
+    )
+    rebuild_parser = subparsers.add_parser(
+        "rebuild",
+        help="Rebuild Docker images with latest code and restart. Use flags to select what to rebuild.",
+    )
+    rebuild_parser.add_argument("--core", action="store_true", help="Rebuild workers (celery-worker, temporal-worker).")
+    rebuild_parser.add_argument("--api", action="store_true", help="Rebuild queen-api.")
+    rebuild_parser.add_argument("--dashboard", action="store_true", help="Same as --api.")
+    rebuild_parser.add_argument("--all", action="store_true", help="Rebuild everything (default).")
+    reset_parser = subparsers.add_parser(
+        "reset",
+        help="Alias for rebuild: rebuild images with latest code and restart.",
+    )
+    reset_parser.add_argument("--core", action="store_true", help="Rebuild workers only.")
+    reset_parser.add_argument("--api", action="store_true", help="Rebuild queen-api only.")
+    reset_parser.add_argument("--dashboard", action="store_true", help="Same as --api.")
+    reset_parser.add_argument("--all", action="store_true", help="Rebuild everything (default).")
+    setup_parser = subparsers.add_parser("setup", help="First-time setup wizard (doctor, tenant, optional admin)")
+    setup_parser.add_argument("--non-interactive", action="store_true", help="Use defaults, no prompts")
+    quickstart_parser = subparsers.add_parser("quickstart", help="5-minute quickstart (doctor, tenant, minimal prompts)")
+    quickstart_parser.add_argument("--non-interactive", action="store_true", help="Use defaults, no prompts")
+    onboard_parser = subparsers.add_parser("onboard", help="Onboard a Queen into an existing hive")
+    onboard_parser.add_argument("--non-interactive", action="store_true", help="Use defaults, no prompts")
+    init_tenant_parser = subparsers.add_parser("init-tenant", help="Initialize Beekeeper org/hive")
+    init_tenant_parser.add_argument("--org", default="Default Organization")
+    init_tenant_parser.add_argument("--hive", default="Main Hive")
+    init_tenant_parser.add_argument("--honeycomb-root", default=".honeycomb")
     metrics_parser = subparsers.add_parser("metrics", help="Compute telemetry metrics from Honeycomb")
     metrics_parser.add_argument("--honeycomb-root", default=".honeycomb")
     metrics_parser.add_argument("--webhook-url", default=None)
+
+    pulse_parser = subparsers.add_parser("pulse", help="Run Pulse tick loop (Queen autonomy)")
+    pulse_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    pulse_parser.add_argument("--interval", type=float, default=2.0, help="Tick interval in seconds")
 
     review_parser = subparsers.add_parser("review", help="Manage human approval queue")
     review_parser.add_argument("--honeycomb-root", default=".honeycomb")
@@ -451,6 +1256,73 @@ def main() -> None:
     reject_parser.add_argument("--note", default="")
     reject_parser.add_argument("--resume", action="store_true")
 
+    settings_parser = subparsers.add_parser("settings", help="Manage Beekeeper settings (CLI)")
+    settings_sub = settings_parser.add_subparsers(dest="settings_command", required=True)
+    settings_sub.add_parser("list", help="List all settings")
+    get_parser = settings_sub.add_parser("get", help="Get a setting by key")
+    get_parser.add_argument("key", help="Setting key")
+    set_parser = settings_sub.add_parser("set", help="Set a setting")
+    set_parser.add_argument("key", help="Setting key")
+    set_parser.add_argument("json_value", help="JSON value (e.g. '\"value\"' or '{\"a\":1}')")
+    set_parser.add_argument("--hive", dest="hive_id", help="Scope to hive (hive-level setting)")
+
+    channels_parser = subparsers.add_parser("channels", help="Manage channel configs (Slack, Telegram, Discord)")
+    channels_sub = channels_parser.add_subparsers(dest="channels_command", required=True)
+    channels_sub.add_parser("list", help="List channel configs (secrets redacted)")
+    channels_set_parser = channels_sub.add_parser("set", help="Set channel config")
+    channels_set_parser.add_argument("channel", help="Channel name: slack, telegram, discord")
+    channels_set_parser.add_argument("json_value", help="JSON config (e.g. '{\"slack_bot_token\":\"xoxb-...\"}')")
+
+    templates_parser = subparsers.add_parser("templates", help="Manage agent templates")
+    templates_sub = templates_parser.add_subparsers(dest="templates_command", required=True)
+    templates_sub.add_parser("list", help="List templates")
+    templates_inst_parser = templates_sub.add_parser("instantiate", help="Instantiate a template as a Queen")
+    templates_inst_parser.add_argument("template_id", help="Template ID from list")
+    templates_inst_parser.add_argument("--hive", "--hive-id", dest="hive_id", required=True, help="Hive ID")
+    templates_inst_parser.add_argument("--name", required=True, help="Queen name")
+
+    sessions_parser = subparsers.add_parser("sessions", help="Session tree and branching")
+    sessions_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    sessions_sub = sessions_parser.add_subparsers(dest="sessions_command", required=True)
+    sessions_sub.add_parser("list", help="List sessions")
+    sessions_create = sessions_sub.add_parser("create", help="Create a new session")
+    sessions_traces = sessions_sub.add_parser("traces", help="List traces in a session")
+    sessions_traces.add_argument("session_id", help="Session ID")
+    sessions_tree = sessions_sub.add_parser("tree", help="Show trace tree (branching)")
+    sessions_tree.add_argument("trace_id", help="Trace ID")
+
+    install_parser = subparsers.add_parser("install", help="Install worker/guardrail package (beehive install <pkg>)")
+    install_parser.add_argument("package", nargs="?", help="Package name (PyPI) or path; omit with --list")
+    install_parser.add_argument("--list", action="store_true", dest="install_list", help="List installed plugins")
+    install_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    install_parser.add_argument("--local", "-l", action="store_true", dest="install_local", help="Install to project-local .beehive/workers/")
+    install_parser.add_argument("--editable", "-e", action="store_true", help="Install in editable mode")
+    install_parser.add_argument("--no-registry", action="store_true", help="Do not add worker to registry")
+
+    list_workers_parser = subparsers.add_parser("list-workers", help="List built-in and installed workers")
+    list_workers_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    list_workers_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    traces_parser = subparsers.add_parser("traces", help="Trace operations")
+    traces_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    traces_sub = traces_parser.add_subparsers(dest="traces_command", required=True)
+    traces_compact = traces_sub.add_parser("compact", help="Compact trace files to reduce size")
+    traces_compact.add_argument("--trace-id", help="Compact only this trace")
+    traces_compact.add_argument("--all", action="store_true", help="Compact all traces")
+    traces_compact.add_argument("--min-age-hours", type=float, default=0, help="Only compact traces older than N hours")
+    traces_tree = traces_sub.add_parser("tree", help="Show trace tree (session branching)")
+    traces_tree.add_argument("trace_id", help="Trace ID")
+    traces_fork = traces_sub.add_parser("fork", help="Fork a trace (create new branch)")
+    traces_fork.add_argument("trace_id", help="Parent trace ID")
+    traces_fork.add_argument("--session-id", help="Session to attach to; creates new session if omitted")
+
+    shell_parser = subparsers.add_parser("shell", help="Interactive shell with command discovery")
+    shell_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    subparsers.add_parser("commands", help="List all commands")
+    subparsers.add_parser("version", help="Show version")
+    update_parser = subparsers.add_parser("update", help="Upgrade beehive package")
+    update_parser.add_argument("--channel", "-c", choices=["stable", "beta", "dev"], default="stable", help="Release channel: stable (default), beta, dev")
+
     args = parser.parse_args()
     if args.command is None:
         exit_code = _run_doctor(auto_start=True)
@@ -467,14 +1339,24 @@ def main() -> None:
     if args.command == "chat":
         raise SystemExit(_run_chat_loop(args))
     if args.command == "doctor":
-        raise SystemExit(_run_doctor(auto_start=args.auto_start))
+        raise SystemExit(_run_doctor(auto_start=args.auto_start, json_output=getattr(args, "doctor_json", False)))
     if args.command == "up":
         display_cmd = _compose_cmd_for_display(
             ["up", "-d", "redis", "temporal", "qdrant", "searxng"]
             + (["celery-worker", "temporal-worker"] if args.with_workers else [])
+            + (["queen-api", "open-webui"] if args.with_open_webui else [])
         )
         _print_executed_command(display_cmd)
-        raise SystemExit(_ensure_required_services_running(include_workers=args.with_workers))
+        exit_code = _ensure_required_services_running(include_workers=args.with_workers)
+        if exit_code != 0:
+            raise SystemExit(exit_code)
+        if args.with_open_webui:
+            result = _run_compose(["up", "-d", "queen-api", "open-webui"], capture_output=True)
+            if result.returncode != 0:
+                print("[FAIL] compose: could not start queen-api / open-webui")
+                print((result.stderr or "").strip())
+                raise SystemExit(1)
+        raise SystemExit(0)
     if args.command == "down":
         cmd = _compose_cmd_for_display(["down"])
         _print_executed_command(cmd)
@@ -493,10 +1375,156 @@ def main() -> None:
             print(f"[FAIL] compose: {exc}")
             raise SystemExit(1)
         raise SystemExit(result.returncode)
+    if args.command == "restart":
+        cmd = _compose_cmd_for_display(["restart"])
+        _print_executed_command(cmd)
+        try:
+            result = _run_compose(["restart"])
+        except RuntimeError as exc:
+            print(f"[FAIL] compose: {exc}")
+            raise SystemExit(1)
+        raise SystemExit(result.returncode)
+    if args.command == "reload":
+        cmd = _compose_cmd_for_display(["restart", "queen-api"])
+        _print_executed_command(cmd)
+        try:
+            result = _run_compose(["restart", "queen-api"])
+        except RuntimeError as exc:
+            print(f"[FAIL] compose: {exc}")
+            raise SystemExit(1)
+        raise SystemExit(result.returncode)
+    if args.command in ("rebuild", "reset"):
+        raise SystemExit(_run_rebuild(args))
     if args.command == "review":
         raise SystemExit(_run_review_command(args))
     if args.command == "metrics":
         raise SystemExit(_run_metrics_command(args))
+    if args.command == "pulse":
+        config = PulseConfig(
+            honeycomb_root=Path(args.honeycomb_root),
+            interval_seconds=args.interval,
+        )
+        run_pulse_loop(config)
+        return
+    if args.command == "settings":
+        raise SystemExit(_run_settings_command(args))
+    if args.command == "channels":
+        raise SystemExit(_run_channels_command(args))
+    if args.command == "templates":
+        raise SystemExit(_run_templates_command(args))
+    if args.command == "setup":
+        raise SystemExit(_run_setup_wizard(non_interactive=getattr(args, "non_interactive", False)))
+    if args.command == "quickstart":
+        raise SystemExit(_run_quickstart(non_interactive=getattr(args, "non_interactive", False)))
+    if args.command == "onboard":
+        raise SystemExit(_run_onboard_wizard(non_interactive=getattr(args, "non_interactive", False)))
+    if args.command == "sessions":
+        raise SystemExit(_run_sessions_command(args))
+    if args.command == "init-tenant":
+        store = _get_beekeeper_store()
+        org = store.create_org(args.org)
+        hive = store.create_hive(org.org_id, args.hive)
+        comb = store.create_honeycomb(hive.hive_id, f"{args.hive}-comb", args.honeycomb_root)
+        payload = {
+            "org": org.model_dump(mode="json"),
+            "hive": hive.model_dump(mode="json"),
+            "honeycomb": comb.model_dump(mode="json"),
+        }
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        raise SystemExit(0)
+
+    if args.command == "list-workers":
+        _run_list_workers(args)
+        raise SystemExit(0)
+
+    if args.command == "install":
+        if getattr(args, "install_list", False):
+            root = Path.cwd() / ".beehive" if getattr(args, "install_local", False) else Path(args.honeycomb_root)
+            plugins = list_installed_plugins(root)
+            print(json.dumps(plugins, ensure_ascii=True, indent=2))
+            raise SystemExit(0)
+        if not args.package:
+            print("[FAIL] Package name required. Use 'beehive install <package>' or 'beehive install --list'", file=sys.stderr)
+            raise SystemExit(1)
+        install_root = Path.cwd() / ".beehive" if getattr(args, "install_local", False) else Path(args.honeycomb_root)
+        ok, msg = install_package(
+            args.package,
+            install_root,
+            editable=getattr(args, "editable", False),
+            registry=not getattr(args, "no_registry", False),
+        )
+        if ok:
+            print(f"[OK] {msg}")
+            raise SystemExit(0)
+        print(f"[FAIL] {msg}", file=sys.stderr)
+        raise SystemExit(1)
+
+    if args.command == "traces":
+        traces_cmd = getattr(args, "traces_command", None)
+        if traces_cmd == "compact":
+            result = compact_traces(
+                Path(args.honeycomb_root),
+                trace_id=getattr(args, "trace_id", None),
+                all_traces=getattr(args, "all", False),
+                min_age_hours=getattr(args, "min_age_hours", 0),
+            )
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+            if result.get("error"):
+                raise SystemExit(1)
+            raise SystemExit(0)
+        if traces_cmd == "tree":
+            store = _build_store(getattr(args, "honeycomb_root", ".honeycomb"))
+            trace_id = getattr(args, "trace_id", None)
+            if not trace_id:
+                print("[FAIL] trace_id required", file=sys.stderr)
+                raise SystemExit(1)
+            tree = store.get_trace_tree(trace_id)
+            print(json.dumps(tree, ensure_ascii=True, indent=2))
+            raise SystemExit(0)
+        if traces_cmd == "fork":
+            from .sdk import BeehiveClient
+            honeycomb_root = getattr(args, "honeycomb_root", ".honeycomb")
+            client = BeehiveClient(honeycomb_root=honeycomb_root)
+            trace_id = getattr(args, "trace_id", None)
+            session_id = getattr(args, "session_id", None)
+            if not trace_id:
+                print("[FAIL] trace_id required", file=sys.stderr)
+                raise SystemExit(1)
+            new_trace_id = client.fork_trace(trace_id, session_id=session_id)
+            print(json.dumps({"trace_id": new_trace_id, "parent_trace_id": trace_id}, ensure_ascii=True, indent=2))
+            raise SystemExit(0)
+        raise SystemExit(1)
+
+    if args.command == "shell":
+        raise SystemExit(_run_shell(honeycomb_root=args.honeycomb_root))
+
+    if args.command == "commands":
+        _run_commands_list()
+        raise SystemExit(0)
+
+    if args.command == "version":
+        try:
+            import importlib.metadata
+            v = importlib.metadata.version("beehive-agent-platform")
+            print(f"beehive-agent-platform {v}")
+        except Exception:
+            print("beehive-agent-platform (version unknown)")
+        raise SystemExit(0)
+
+    if args.command == "update":
+        channel = getattr(args, "channel", "stable")
+        if channel == "stable":
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "beehive-agent-platform"]
+        elif channel == "beta":
+            index = os.getenv("BEEHIVE_UPDATE_BETA_INDEX", "")
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--pre", "beehive-agent-platform"]
+            if index:
+                cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--pre", "-i", index, "beehive-agent-platform"]
+        else:
+            proj = _project_root()
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "-e", str(proj)]
+        result = subprocess.run(cmd, capture_output=False)
+        raise SystemExit(result.returncode)
 
 
 if __name__ == "__main__":

@@ -9,19 +9,36 @@ description = "Beehive-style multi-agent runtime with queen orchestration and ep
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+  "python-dotenv>=1.0.0",
   "pydantic>=2.7.0",
   "eval_type_backport>=0.2.0",
   "celery>=5.4.0",
   "redis>=5.0.0",
   "temporalio>=1.7.0",
   "qdrant-client>=1.10.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "python-jose[cryptography]>=3.3.0",
+  "bcrypt>=4.0.0",
+  "slack-sdk>=3.27.0",
+  "cryptography>=42.0.0",
+  "PyNaCl>=1.5.0",
+  "croniter>=2.0.0",
+  "PyYAML>=6.0",
 ]
 
 [project.scripts]
 beehive = "beehive.runner:main"
+beekeeper-api = "beekeeper_api.app:main"
+queen-api = "queen_api.app:main"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+  "ignore:urllib3 v2 only supports OpenSSL::"
+]
 
 [tool.setuptools]
-packages = ["beehive"]
+packages = ["beehive", "beekeeper_api", "queen_api"]
 
 [tool.setuptools.package-data]
 beehive = ["souls/*.json", "souls/*.md"]
