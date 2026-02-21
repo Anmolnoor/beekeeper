@@ -32,6 +32,77 @@ class WorkerKind(str, Enum):
     web_search = "web_search"
     heavy_compute = "heavy_compute"
     audit = "audit"
+    monitor = "monitor"
+    logger = "logger"
+    custom = "custom"
+
+
+class ProfileType(str, Enum):
+    soul = "soul"
+    abilities = "abilities"
+    accountabilities = "accountabilities"
+    rules = "rules"
+    guardrails = "guardrails"
+    skills = "skills"
+
+
+class AbilitiesProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    abilities_profile_id: str
+    name: str
+    capabilities: list[str] = Field(default_factory=list)
+    tool_allowlist: list[str] = Field(default_factory=list)
+    max_parallel_tools: int = 2
+    version: str = SCHEMA_VERSION
+
+
+class AccountabilityPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accountability_id: str
+    name: str
+    owner: str = "platform"
+    must_emit_audit_log: bool = True
+    max_unapproved_actions: int = 0
+    requires_trace_for_all_actions: bool = True
+    version: str = SCHEMA_VERSION
+
+
+class GuardrailProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    guardrail_profile_id: str
+    name: str
+    enabled_guardrails: list[str] = Field(default_factory=list)
+    allow_external_network: bool = True
+    enforce_domain_allowlist: bool = True
+    version: str = SCHEMA_VERSION
+
+
+class ProfileBundleRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    soul_id: str
+    abilities_id: str
+    accountabilities_id: str
+    rules_id: str
+    guardrails_id: str
+    skills_id: str
+
+
+class AgentBlueprint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    blueprint_id: str
+    name: str
+    agent_type: Literal["queen", "worker"]
+    worker_kind: WorkerKind | None = None
+    trust_tier: TrustTier = TrustTier.medium
+    profile_bundle: ProfileBundleRef
+    tags: list[str] = Field(default_factory=list)
+    is_template: bool = False
+    version: str = SCHEMA_VERSION
 
 
 class ArtifactRef(BaseModel):
@@ -72,6 +143,7 @@ class SkillProfile(BaseModel):
     skill_profile_id: str
     name: str
     description: str
+    when_to_use: str | None = Field(default=None, description="Trigger scenarios (Agent Skills standard: when to apply)")
     tool_allowlist: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
     can_search_web: bool = False
@@ -266,3 +338,26 @@ class ResultEnvelope(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     output_schema: str = "generic"
     version: str = SCHEMA_VERSION
+
+
+class QueenActionRequest(BaseModel):
+    """A single action the Queen wants to execute."""
+    model_config = ConfigDict(extra="forbid")
+
+    action_name: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str = ""
+    triggered_by: str = "queen"
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class QueenActionResult(BaseModel):
+    """Result of a Queen action execution, including any memories to persist."""
+    model_config = ConfigDict(extra="forbid")
+
+    action_name: str
+    success: bool
+    output: dict[str, Any] = Field(default_factory=dict)
+    memory_snippets: list[str] = Field(default_factory=list)
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)

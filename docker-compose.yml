@@ -45,7 +45,7 @@ services:
       BASE_URL: http://localhost:8080/
       INSTANCE_NAME: beehive-searxng
     healthcheck:
-      test: ["CMD", "wget", "-qO", "-", "http://localhost:8080/search?format=json&q=beehive"]
+      test: ["CMD", "wget", "-qO", "-", "http://localhost:8080/"]
       interval: 10s
       timeout: 5s
       retries: 20
@@ -63,7 +63,9 @@ services:
       BEEHIVE_VECTOR_BACKEND: qdrant
       BEEHIVE_VECTOR_COLLECTION: honeycomb_memory
       BEEHIVE_VECTOR_URL: http://qdrant:6333
+      BEEHIVE_LLM_PROVIDER: ${BEEHIVE_LLM_PROVIDER:-ollama}
       BEEHIVE_OLLAMA_BASE_URL: ${BEEHIVE_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
+      BEEHIVE_OLLAMA_MODEL: ${BEEHIVE_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
       BEEHIVE_SEARXNG_BASE_URL: ${BEEHIVE_SEARXNG_BASE_URL:-http://searxng:8080}
       BEEHIVE_TEMPORAL_ENDPOINT: temporal:7233
       BEEHIVE_TEMPORAL_NAMESPACE: default
@@ -92,7 +94,9 @@ services:
       BEEHIVE_VECTOR_BACKEND: qdrant
       BEEHIVE_VECTOR_COLLECTION: honeycomb_memory
       BEEHIVE_VECTOR_URL: http://qdrant:6333
+      BEEHIVE_LLM_PROVIDER: ${BEEHIVE_LLM_PROVIDER:-ollama}
       BEEHIVE_OLLAMA_BASE_URL: ${BEEHIVE_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
+      BEEHIVE_OLLAMA_MODEL: ${BEEHIVE_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
       BEEHIVE_SEARXNG_BASE_URL: ${BEEHIVE_SEARXNG_BASE_URL:-http://searxng:8080}
       BEEHIVE_TEMPORAL_ENDPOINT: temporal:7233
       BEEHIVE_TEMPORAL_NAMESPACE: default
@@ -107,6 +111,72 @@ services:
       searxng:
         condition: service_started
 
+  pulse:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beehive-pulse
+    command: ["python", "-m", "beehive.runner", "pulse", "--interval", "2", "--honeycomb-root", "/app/runtime/honeycomb"]
+    environment:
+      BEEHIVE_HONEYCOMB_ROOT: /app/runtime/honeycomb
+      BEEHIVE_LLM_PROVIDER: ${BEEHIVE_LLM_PROVIDER:-ollama}
+      BEEHIVE_OLLAMA_BASE_URL: ${BEEHIVE_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
+      BEEHIVE_OLLAMA_MODEL: ${BEEHIVE_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      BEEHIVE_SEARXNG_BASE_URL: ${BEEHIVE_SEARXNG_BASE_URL:-http://searxng:8080}
+    volumes:
+      - honeycomb_data:/app/runtime/honeycomb
+    depends_on:
+      redis:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+
+  queen-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beehive-queen-api
+    command: ["python", "-m", "queen_api.app"]
+    ports:
+      - "8788:8788"
+    environment:
+      BEEHIVE_HONEYCOMB_ROOT: /app/runtime/honeycomb
+      BEEHIVE_SCHEDULER_BACKEND: inline
+      BEEHIVE_VECTOR_BACKEND: qdrant
+      BEEHIVE_VECTOR_URL: http://qdrant:6333
+      BEEHIVE_VECTOR_COLLECTION: honeycomb_memory
+      BEEHIVE_LLM_PROVIDERS: ${BEEHIVE_LLM_PROVIDERS:-gemini,ollama}
+      BEEHIVE_LLM_PROVIDER: ${BEEHIVE_LLM_PROVIDER:-ollama}
+      BEEHIVE_GEMINI_API_KEY: ${BEEHIVE_GEMINI_API_KEY:-}
+      BEEHIVE_GEMINI_MODEL: ${BEEHIVE_GEMINI_MODEL:-gemini-1.5-flash}
+      BEEHIVE_OLLAMA_BASE_URL: ${BEEHIVE_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      BEEHIVE_OLLAMA_MODEL: ${BEEHIVE_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      BEEHIVE_SEARXNG_BASE_URL: ${BEEHIVE_SEARXNG_BASE_URL:-http://searxng:8080}
+    volumes:
+      - honeycomb_data:/app/runtime/honeycomb
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      temporal:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      searxng:
+        condition: service_started
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: beehive-open-webui
+    ports:
+      - "3000:8080"
+    environment:
+      OLLAMA_BASE_URL: ${BEEHIVE_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - open_webui_data:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   qdrant_data:
   honeycomb_data:
+  open_webui_data:

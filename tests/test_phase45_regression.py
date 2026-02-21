@@ -26,6 +26,7 @@ def test_hitl_blocks_without_approval(tmp_path: Path) -> None:
             "query": "prepare payment change request",
             "action": "payment_action",
             "requires_human_approval": True,
+            "use_web_search": True,
         },
     )
     statuses = [item["status"] for item in response["results"]]
@@ -52,7 +53,7 @@ def test_hitl_approval_path_allows_execution(tmp_path: Path) -> None:
 
 def test_adaptive_feedback_file_created(tmp_path: Path) -> None:
     queen = _make_queen(tmp_path)
-    queen.run(intent="research_topic", payload={"query": "durable workflows"})
+    queen.run(intent="research_topic", payload={"query": "durable workflows", "use_web_search": True})
     feedback_file = tmp_path / ".honeycomb" / "optimizer" / "routing_feedback.json"
     assert feedback_file.exists()
     content = feedback_file.read_text(encoding="utf-8")

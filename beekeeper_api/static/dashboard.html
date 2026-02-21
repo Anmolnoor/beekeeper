@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Beehive Control</title>
+  <style>
+    :root { --bg: #0f0f12; --card: #1a1a1f; --border: #2a2a32; --text: #e8e8ed; --muted: #888; --accent: #7c6ef6; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1.5rem; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .card h2 { font-size: 0.875rem; font-weight: 500; color: var(--muted); margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+    .login { max-width: 360px; margin: 2rem auto; }
+    .login input { width: 100%; padding: 0.6rem; margin-bottom: 0.75rem; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+    .login button { width: 100%; padding: 0.6rem; background: var(--accent); border: none; border-radius: 6px; color: white; font-weight: 500; cursor: pointer; }
+    .login button:hover { opacity: 0.9; }
+    .login a { color: var(--accent); font-size: 0.875rem; margin-top: 0.5rem; display: inline-block; }
+    .error { color: #f87171; font-size: 0.875rem; margin-bottom: 0.5rem; }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 0.35rem 0; font-size: 0.875rem; }
+    .badge { background: var(--border); padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; }
+    .status-ok { color: #4ade80; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+    .logout { font-size: 0.875rem; color: var(--muted); cursor: pointer; }
+    .logout:hover { color: var(--text); }
+    ul { list-style: none; font-size: 0.875rem; }
+    li { padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
+    li:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="login-view" class="login card" style="display:none">
+      <h1>Beehive Control</h1>
+      <p class="muted" style="color:var(--muted);font-size:0.875rem;margin-bottom:1rem">Sign in to manage channels, templates, and settings.</p>
+      <div id="login-error" class="error"></div>
+      <input type="email" id="email" placeholder="Email" autocomplete="email">
+      <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+      <button onclick="doLogin()">Sign in</button>
+      <a href="#" onclick="showRegister(); return false;">Register</a>
+    </div>
+    <div id="register-view" class="login card" style="display:none">
+      <h1>Register</h1>
+      <div id="register-error" class="error"></div>
+      <input type="email" id="reg-email" placeholder="Email">
+      <input type="password" id="reg-password" placeholder="Password">
+      <button onclick="doRegister()">Create account</button>
+      <a href="#" onclick="showLogin(); return false;">Back to sign in</a>
+    </div>
+    <div id="dashboard-view" style="display:none">
+      <div class="header">
+        <h1>Beehive Control</h1>
+        <span class="logout" onclick="logout()">Sign out</span>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <h2>Channels</h2>
+          <div id="channels-list">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>Templates</h2>
+          <div id="templates-list">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>Organizations</h2>
+          <div id="orgs-list">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>Health</h2>
+          <div id="health-status">Checking…</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Quick links</h2>
+        <p style="font-size:0.875rem;color:var(--muted)">
+          Chat: <a href="http://localhost:3000" target="_blank" rel="noopener" style="color:var(--accent)">Open WebUI</a> &middot;
+          CLI: <code>beehive channels list</code> &middot;
+          <code>beehive templates list</code>
+        </p>
+      </div>
+    </div>
+  </div>
+  <script>
+    // API base: empty = same origin; override via ?api=http://localhost:8787 or window.BEEKEEPER_API_URL
+    const API = (() => {
+      const params = new URLSearchParams(window.location.search);
+      const fromUrl = params.get('api') || params.get('api_base');
+      if (fromUrl) return fromUrl.replace(/\/$/, '');
+      if (typeof window !== 'undefined' && window.BEEKEEPER_API_URL) return window.BEEKEEPER_API_URL.replace(/\/$/, '');
+      return '';
+    })();
+    function token() { return localStorage.getItem('beehive_token'); }
+    function api(url, opts = {}) {
+      const h = { ...opts.headers };
+      if (token()) h['Authorization'] = 'Bearer ' + token();
+      return fetch(API + url, { ...opts, headers: h });
+    }
+    function showLogin() {
+      document.getElementById('login-view').style.display = 'block';
+      document.getElementById('register-view').style.display = 'none';
+    }
+    function showRegister() {
+      document.getElementById('login-view').style.display = 'none';
+      document.getElementById('register-view').style.display = 'block';
+    }
+    async function doLogin() {
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      document.getElementById('login-error').textContent = '';
+      const base = API || window.location.origin;
+      try {
+        const r = await fetch(base + '/api/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || data.message || 'Login failed');
+        localStorage.setItem('beehive_token', data.access_token);
+        showDashboard();
+      } catch (e) {
+        const msg = e.message || (e.name === 'TypeError' && e.cause ? 'Network error: cannot reach API' : String(e));
+        document.getElementById('login-error').textContent = msg;
+      }
+    }
+    async function doRegister() {
+      const email = document.getElementById('reg-email').value;
+      const password = document.getElementById('reg-password').value;
+      document.getElementById('register-error').textContent = '';
+      const base = API || window.location.origin;
+      try {
+        const r = await fetch(base + '/api/auth/register', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || data.message || 'Registration failed');
+        localStorage.setItem('beehive_token', data.access_token);
+        showDashboard();
+      } catch (e) {
+        const msg = e.message || (e.name === 'TypeError' && e.cause ? 'Network error: cannot reach API' : String(e));
+        document.getElementById('register-error').textContent = msg;
+      }
+    }
+    function logout() {
+      localStorage.removeItem('beehive_token');
+      document.getElementById('login-view').style.display = 'block';
+      document.getElementById('register-view').style.display = 'none';
+      document.getElementById('dashboard-view').style.display = 'none';
+    }
+    async function showDashboard() {
+      const me = await api('/api/auth/me');
+      if (me.status === 401) {
+        localStorage.removeItem('beehive_token');
+        document.getElementById('login-view').style.display = 'block';
+        document.getElementById('register-view').style.display = 'none';
+        document.getElementById('dashboard-view').style.display = 'none';
+        return;
+      }
+      document.getElementById('login-view').style.display = 'none';
+      document.getElementById('register-view').style.display = 'none';
+      document.getElementById('dashboard-view').style.display = 'block';
+      loadCards();
+    }
+    async function loadCards() {
+      const [chRes, tplRes, orgRes, healthRes] = await Promise.all([
+        api('/api/channels'),
+        api('/api/templates'),
+        api('/api/orgs'),
+        api('/healthz')
+      ]);
+      document.getElementById('channels-list').innerHTML = chRes.ok
+        ? ((await chRes.json()).channels || []).map(c => `<div class="row"><span>${c.channel || '-'}</span><span class="badge">configured</span></div>`).join('') || '<div class="row">No channels</div>'
+        : '<div class="error">Unauthorized</div>';
+      const tplData = tplRes.ok ? await tplRes.json() : {};
+      const templates = tplData.templates || [];
+      document.getElementById('templates-list').innerHTML = tplRes.ok
+        ? templates.map(t => `<div class="row"><span>${t.name || t.template_id}</span></div>`).join('') || '<div class="row">No templates</div>'
+        : '<div class="error">Unauthorized</div>';
+      document.getElementById('orgs-list').innerHTML = orgRes.ok
+        ? ((await orgRes.json()).orgs || []).map(o => `<div class="row"><span>${o.name || o.org_id}</span></div>`).join('') || '<div class="row">No orgs</div>'
+        : '<div class="error">Unauthorized</div>';
+      document.getElementById('health-status').innerHTML = healthRes.ok
+        ? '<span class="status-ok">OK</span>'
+        : '<span class="error">Unhealthy</span>';
+    }
+    (async function init() {
+      const base = API || window.location.origin;
+      try {
+        const r = await fetch(base + '/api/init/status');
+        if (!r.ok) throw new Error('API returned ' + r.status);
+        const status = await r.json();
+        if (token()) {
+          await showDashboard();
+        } else {
+          document.getElementById('login-view').style.display = 'block';
+          if (status.needs_setup && !status.has_users) {
+            document.querySelector('#login-view .muted').textContent = 'Register to create the first account and run onboarding.';
+          }
+        }
+      } catch (e) {
+        document.getElementById('login-view').style.display = 'block';
+        document.getElementById('login-error').textContent = 'Cannot reach API at ' + base + '. Is beekeeper-api running on port 8787? ' + (e.message || '');
+      }
+    })();
+  </script>
+</body>
+</html>

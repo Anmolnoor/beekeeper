@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Protocol, Tuple
 
@@ -65,7 +66,9 @@ class QdrantVectorStore:
 
             self._qdrant_models = qdrant_models
             self._client = QdrantClient(url=self.url)
-            self._client.recreate_collection(
+            if self._client.collection_exists(self.collection):
+                self._client.delete_collection(self.collection)
+            self._client.create_collection(
                 collection_name=self.collection,
                 vectors_config=qdrant_models.VectorParams(size=self.dim, distance=qdrant_models.Distance.COSINE),
             )
@@ -79,10 +82,11 @@ class QdrantVectorStore:
         if not self._ready:
             self._fallback.upsert(item_id, text)
             return
+        point_id = uuid.uuid5(uuid.NAMESPACE_DNS, item_id)
         point = self._qdrant_models.PointStruct(
-            id=item_id,
+            id=point_id,
             vector=embedding,
-            payload={"text": text},
+            payload={"text": text, "item_id": item_id},
         )
         self._client.upsert(collection_name=self.collection, points=[point])
 
@@ -90,8 +94,11 @@ class QdrantVectorStore:
         if not self._ready:
             return self._fallback.search(query, limit=limit)
         embedding = _hash_embedding(query, dim=self.dim)
-        hits = self._client.search(collection_name=self.collection, query_vector=embedding, limit=limit)
-        return [str(hit.id) for hit in hits]
+        response = self._client.query_points(
+            collection_name=self.collection, query=embedding, limit=limit
+        )
+        hits = response.points if hasattr(response, "points") else []
+        return [str(hit.payload.get("item_id", hit.id)) for hit in hits]
 
 
 def build_vector_store(backend: str, **kwargs: str) -> VectorStore:

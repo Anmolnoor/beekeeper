@@ -11,17 +11,27 @@ Reference implementation of a beehive-style multi-agent architecture:
 - Durable worker execution via Temporal workflows.
 - Semantic memory adapters with in-memory and Qdrant backends.
 
-## Quick Start
+## Quick Start in 5 Minutes
 
 ```bash
-python -m beehive.demo
+beehive quickstart
 ```
 
-Or with CLI:
+Runs health checks, initializes tenant (org/hive), and prepares the environment. Then:
+
+```bash
+beehive chat
+```
+
+Or run a single query:
 
 ```bash
 beehive run --scheduler inline --vector memory --query "best agent sdk patterns"
 ```
+
+**Alternative:** Run `beehive` (no subcommand) to run health checks and auto-start Docker services if needed.
+
+For new users, see [docs/ONBOARDING.md](docs/ONBOARDING.md). For choosing scheduler, worker, or channel, see [docs/DECISION_TREE.md](docs/DECISION_TREE.md).
 
 ## One-Command Infra Boot
 
@@ -36,6 +46,8 @@ This starts:
 - SearXNG (`8080`)
 - Celery worker
 - Temporal worker
+- Queen API (`8788` on host) – OpenAI-compatible adapter for Queen agent
+- Open WebUI (`3000`) – chat UI (connect to Queen or Ollama)
 
 Compose reads `.env`, including:
 - `BEEHIVE_LLM_PROVIDER=ollama`
@@ -155,11 +167,96 @@ beehive chat --scheduler inline
 beehive doctor --auto-start
 beehive up
 beehive up --with-workers
+beehive up --with-open-webui
 beehive ps
 beehive down
+beehive restart
+beehive reload
+beehive rebuild [--core] [--api] [--all]
+beehive reset [--core] [--api] [--all]
 beehive review list --honeycomb-root .honeycomb
 beehive review approve <review_id> --approver oncall --resume
 beehive metrics --honeycomb-root .honeycomb
+beehive init-tenant --org "Default Organization" --hive "Main Hive"
+beehive settings list|get|set
+beehive channels list|set
+beehive templates list|instantiate
+```
+
+## Chat via Open WebUI
+
+Start Queen API and Open WebUI for chat:
+
+```bash
+beehive up --with-open-webui
+```
+
+Then open **http://localhost:3000** (Open WebUI).
+
+**Configure Queen in Open WebUI:**
+1. Go to Admin Settings → Connections → OpenAI
+2. Add connection: Base URL `http://queen-api:8787/v1` (Docker) or `http://localhost:8788/v1` (when Queen API runs in Docker, host port 8788)
+3. Add model ID to allowlist: `beehive-queen`
+4. Select the Queen model in the chat UI to chat with the agent
+
+See [docs/PROMPT_TEMPLATES.md](docs/PROMPT_TEMPLATES.md) for customizing prompts.
+
+**Control dashboard**: Open `http://localhost:8787/dashboard` for a lightweight UI (channels, templates, orgs). Register or sign in to view.
+
+Settings and channels are configured via CLI:
+
+```bash
+beehive settings list
+beehive settings set my_key '{"value": 42}'
+beehive channels set slack '{"slack_bot_token":"xoxb-...","slack_signing_secret":"..."}'
+beehive templates list
+beehive templates instantiate tpl_xxx --hive hive_yyy --name "Main Queen"
+```
+
+## Modular Agent Kernel
+
+The runtime now supports profile-driven modularization:
+- `AgentBlueprint` defines Queen/Worker shape.
+- Profiles are split across `soul`, `abilities`, `accountabilities`, `rules`, `guardrails`, `skills`.
+- Composition order is deterministic: `accountabilities -> rules -> guardrails -> skills -> soul`.
+
+Migration helper to export current defaults into template store:
+
+```bash
+python -m beehive.migrate_blueprints
+```
+
+## Multi-Hive and Template Store
+
+Beekeeper file store (default `.beekeeper_store`) tracks:
+- `orgs`, `hives`, `honeycombs`, `queens`
+- `templates`, `settings`, `channels`
+- signed `audit` events
+
+Initialize a starter tenant:
+
+```bash
+beehive init-tenant --org "Acme" --hive "Ops Hive"
+```
+
+## Queen API (OpenAI-Compatible)
+
+The Queen agent is exposed as an OpenAI-compatible API for use with Open WebUI:
+
+- `GET /v1/models` – returns `beehive-queen`
+- `POST /v1/chat/completions` – forwards to Queen agent
+
+Optional header: `X-Beehive-Intent` to set the Queen intent (default: `research_topic`).
+
+For Slack/Telegram/Discord channel webhooks, run `beekeeper-api` and configure channels via `beehive channels set`. See [docs/CHANNEL_ALLOWLISTS.md](docs/CHANNEL_ALLOWLISTS.md) for restricting which channels/users can use the bot.
+
+## Security and Scale Harness
+
+- Signed audit logs use `BEEKEEPER_AUDIT_SIGNING_KEY`.
+- Run synthetic load checks:
+
+```bash
+python scripts/load_test.py --runs 20 --intent research_topic
 ```
 
 ## Interactive Queen Chat
@@ -200,6 +297,10 @@ The profile is designed from high-signal traits common in leading assistant fram
 - explicit uncertainty and confidence reporting
 - strict escalation and policy-first behavior
 - deterministic, evidence-first orchestration
+
+## Remote Access
+
+For secure remote access without opening firewall ports, see [docs/REMOTE_ACCESS_AND_TAILSCALE.md](docs/REMOTE_ACCESS_AND_TAILSCALE.md). Covers Tailscale, ngrok, and Cloudflare Tunnel.
 
 ## Operations Runbook
 

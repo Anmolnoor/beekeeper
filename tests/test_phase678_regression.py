@@ -60,7 +60,7 @@ def test_web_search_worker_uses_searxng_results(monkeypatch) -> None:
         queen_request_id="req_test",
         task_type="research_topic",
         worker_kind=WorkerKind.web_search,
-        payload={"query": "python tutorial"},
+        payload={"query": "python tutorial", "use_web_search": True},
         idempotency_key="id_test",
     )
     output = worker.execute(task, _worker_context())
@@ -88,7 +88,7 @@ def test_web_search_worker_fallback_when_searxng_unavailable(monkeypatch) -> Non
         queen_request_id="req_test",
         task_type="research_topic",
         worker_kind=WorkerKind.web_search,
-        payload={"query": "python tutorial"},
+        payload={"query": "python tutorial", "use_web_search": True},
         idempotency_key="id_test",
     )
     output = worker.execute(task, _worker_context())
@@ -107,7 +107,7 @@ def test_hitl_queue_and_resume(tmp_path: Path) -> None:
     )
     blocked = queen.run(
         intent="research_topic",
-        payload={"query": "payment migration", "action": "payment_action", "requires_human_approval": True},
+        payload={"query": "payment migration", "action": "payment_action", "requires_human_approval": True, "use_web_search": True},
     )
     first = blocked["results"][0]["output"]
     review_id = first["human_review_id"]
