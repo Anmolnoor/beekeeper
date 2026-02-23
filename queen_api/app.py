@@ -220,11 +220,18 @@ def chat_completions(
     if user_memories:
         payload["user_memories"] = user_memories
 
-    log_service_call("queen_api", "called", source="queen_api")
+    log_service_call("queen_api", "called", source="queen_api", user_id=user_id, resource="queen:chat")
     config = _get_queen_config()
     queen = QueenAgent(config)
     result = queen.run(intent=intent, payload=payload, source="queen_api")
-    log_service_call("queen", "completed", source="queen_api", trace_id=result.get("trace_id"))
+    log_service_call(
+        "queen",
+        "completed",
+        source="queen_api",
+        user_id=user_id,
+        resource="queen:chat",
+        trace_id=result.get("trace_id"),
+    )
     reply = _extract_reply(result)
 
     honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
@@ -310,11 +317,11 @@ def run_actions(request: ActionsRequest):
         "queen_actions": request.actions,
         "stop_after_actions": request.stop_after_actions,
     }
-    log_service_call("queen_api", "called", source="queen_api:actions")
+    log_service_call("queen_api", "called", source="queen_api:actions", resource="queen:actions")
     config = _get_queen_config()
     queen = QueenAgent(config)
     result = queen.run(intent=request.intent, payload=payload, source="queen_api")
-    log_service_call("queen", "completed", source="queen_api", trace_id=result.get("trace_id"))
+    log_service_call("queen", "completed", source="queen_api", resource="queen:actions", trace_id=result.get("trace_id"))
     return {
         "ok": True,
         "trace_id": result.get("trace_id"),

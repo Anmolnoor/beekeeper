@@ -1,0 +1,90 @@
+{
+  "version": "1",
+  "default_worker": "web_search",
+  "workers": [
+    {
+      "worker_kind": "web_search",
+      "name": "Web Search",
+      "description": "Searches the web, gathers evidence, and synthesizes answers using LLM.",
+      "capabilities": [
+        "search",
+        "research",
+        "lookup",
+        "find",
+        "web",
+        "internet"
+      ],
+      "intent_patterns": [
+        "research_topic",
+        "search",
+        "lookup"
+      ],
+      "payload_triggers": [
+        "use_web_search",
+        "domains"
+      ],
+      "query_keywords": [
+        "search for",
+        "look up",
+        "find",
+        "research",
+        "what is"
+      ],
+      "priority": 20,
+      "fallback_workers": [
+        "heavy_compute"
+      ]
+    },
+    {
+      "worker_kind": "heavy_compute",
+      "name": "Heavy Compute",
+      "description": "Numeric aggregation, simulations, data analysis.",
+      "capabilities": [
+        "compute",
+        "aggregate",
+        "simulate",
+        "analyze",
+        "numbers"
+      ],
+      "intent_patterns": [
+        "compute",
+        "analysis",
+        "simulate",
+        "aggregate"
+      ],
+      "payload_triggers": [
+        "numbers",
+        "operation"
+      ],
+      "query_keywords": [
+        "sum",
+        "average",
+        "aggregate",
+        "simulate",
+        "calculate"
+      ],
+      "priority": 30,
+      "fallback_workers": []
+    },
+    {
+      "worker_kind": "audit",
+      "name": "Audit",
+      "description": "Reviews and validates outputs from other workers.",
+      "capabilities": [
+        "audit",
+        "review",
+        "validate"
+      ],
+      "intent_patterns": [
+        "audit",
+        "audit_result",
+        "review"
+      ],
+      "payload_triggers": [
+        "target_task_id"
+      ],
+      "priority": 10,
+      "fallback_workers": []
+    }
+  ]
+}
