@@ -122,7 +122,7 @@ beekeeper chat --scheduler inline --vector memory
 2. Create an account or sign in
 3. Configure Queen connection:
    - Admin Settings → Connections → OpenAI
-   - Base URL: `http://localhost:8788/v1`
+   - Base URL: `http://host.docker.internal:8788/v1`
    - Model: `beekeeper-queen`
 
 ### Dashboard

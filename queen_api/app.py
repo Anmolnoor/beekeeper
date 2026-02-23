@@ -129,6 +129,8 @@ def chat_completions(
     x_beekeeper_intent: str | None = Header(None, alias="X-Beekeeper-Intent"),
     x_beekeeper_model: str | None = Header(None, alias="X-Beekeeper-Model"),
     x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id"),
+    x_beekeeper_delegate_worker: str | None = Header(None, alias="X-Beekeeper-Delegate-Worker"),
+    x_beekeeper_use_web_search: str | None = Header(None, alias="X-Beekeeper-Use-Web-Search"),
 ):
     """OpenAI-compatible chat completions. Forwards to Queen agent. X-Beekeeper-Model overrides LLM model. X-Beekeeper-User-Id enables user memory."""
     intent = x_beekeeper_intent or "research_topic"
@@ -169,7 +171,14 @@ def chat_completions(
             ],
         }
 
-    payload: dict = {"query": query}
+    # Default to worker delegation for Open WebUI traffic; allow explicit override via headers.
+    delegate_to_worker = (x_beekeeper_delegate_worker or "true").strip().lower() in {"1", "true", "yes", "on"}
+    use_web_search = (x_beekeeper_use_web_search or "true").strip().lower() in {"1", "true", "yes", "on"}
+    payload: dict = {
+        "query": query,
+        "delegate_to_worker": delegate_to_worker,
+        "use_web_search": use_web_search,
+    }
     if prior:
         payload["messages"] = prior
     if model_override:

@@ -81,7 +81,7 @@ Interface all specialist workers implement:
 
 | Class | `WorkerKind` | What It Does |
 |-------|-------------|-------------|
-| `WebSearchWorker` | `web_search` | Queries SearXNG for web results, synthesizes with LLM, returns `WebSearchOutput` |
+| `WebSearchWorker` | `web_search` | Runs direct LLM reply or SearXNG-backed retrieval depending on `use_web_search`; returns `WebSearchOutput` |
 | `HeavyComputeWorker` | `heavy_compute` | Statistical analysis of number arrays, returns `HeavyComputeOutput` |
 | `AuditWorker` | `audit` | Reviews a target task result for quality/compliance, returns `AuditOutput` |
 
@@ -278,7 +278,7 @@ Used by `HoneycombStore.semantic_search()` to find relevant past artifacts.
 **Purpose**: Wraps SearXNG for web search queries.
 
 - `SearxngAdapter.search(query, domains)` → list of `WebEvidence`
-- Handles domain filtering and result normalization
+- Handles domain filtering and result normalization (when domain list is provided)
 
 ---
 

@@ -115,9 +115,10 @@ Search for the latest Python 3.13 features
 Summarise the concept of RAG for me
 ```
 
-To trigger **web search**, the Queen looks for cues like "search for",
-"look up", or "find". Or use the `X-Beekeeper-Intent` header from the API
-to explicitly set the intent.
+For the Open WebUI chat path (`POST /v1/chat/completions` on `queen-api`), the
+adapter now enables worker delegation and web retrieval by default
+(`delegate_to_worker=true`, `use_web_search=true`). API callers can override
+intent/model/worker flags with Queen API headers (`X-Beekeeper-*`).
 
 ---
 
