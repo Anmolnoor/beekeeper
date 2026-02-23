@@ -1,11 +1,11 @@
 """Programmatic Python SDK for Beehive.
 
-Use BeehiveClient to run Queen requests, chat, doctor checks, and more from Python.
+Use BeekeeperClient to run Queen requests, chat, doctor checks, and more from Python.
 
 Example:
-    from beehive.sdk import BeehiveClient
+    from beekeeper.sdk import BeekeeperClient
 
-    client = BeehiveClient(honeycomb_root=".honeycomb")
+    client = BeekeeperClient(honeycomb_root=".honeycomb")
     result = client.run(intent="research_topic", payload={"query": "What is Python?"})
     print(result)
 """
@@ -26,7 +26,7 @@ from .runner import (
 )
 
 
-class BeehiveClient:
+class BeekeeperClient:
     """Programmatic API for Beehive Queen and runtime operations."""
 
     def __init__(
@@ -51,17 +51,17 @@ class BeehiveClient:
                 max_reruns=self.max_reruns,
                 scheduler_backend=self.scheduler,
                 vector_backend=self.vector_backend,
-                vector_collection=os.getenv("BEEHIVE_VECTOR_COLLECTION", "honeycomb_memory"),
-                vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
-                llm_provider=os.getenv("BEEHIVE_LLM_PROVIDER", "ollama"),
-                llm_providers=os.getenv("BEEHIVE_LLM_PROVIDERS", ""),
-                ollama_base_url=os.getenv("BEEHIVE_OLLAMA_BASE_URL", "http://100.99.106.59:11434"),
-                ollama_model=os.getenv("BEEHIVE_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
-                ollama_timeout_seconds=int(os.getenv("BEEHIVE_OLLAMA_TIMEOUT_SECONDS", "120")),
-                gemini_api_key=os.getenv("BEEHIVE_GEMINI_API_KEY", ""),
-                gemini_model=os.getenv("BEEHIVE_GEMINI_MODEL", "gemini-1.5-flash"),
-                gemini_timeout_seconds=int(os.getenv("BEEHIVE_GEMINI_TIMEOUT_SECONDS", "120")),
-                searxng_base_url=os.getenv("BEEHIVE_SEARXNG_BASE_URL", "http://localhost:8080"),
+                vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+                vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
+                llm_provider=os.getenv("BEEKEEPER_LLM_PROVIDER", "ollama"),
+                llm_providers=os.getenv("BEEKEEPER_LLM_PROVIDERS", ""),
+                ollama_base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://100.99.106.59:11434"),
+                ollama_model=os.getenv("BEEKEEPER_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
+                ollama_timeout_seconds=int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")),
+                gemini_api_key=os.getenv("BEEKEEPER_GEMINI_API_KEY", ""),
+                gemini_model=os.getenv("BEEKEEPER_GEMINI_MODEL", "gemini-1.5-flash"),
+                gemini_timeout_seconds=int(os.getenv("BEEKEEPER_GEMINI_TIMEOUT_SECONDS", "120")),
+                searxng_base_url=os.getenv("BEEKEEPER_SEARXNG_BASE_URL", "http://localhost:8080"),
                 **self._extra_config,
             )
             self._queen = QueenAgent(cfg)
@@ -113,7 +113,7 @@ class BeehiveClient:
             HoneycombConfig(
                 root_dir=self.honeycomb_root,
                 vector_backend=self.vector_backend,
-                vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
+                vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
             )
         )
 
@@ -147,7 +147,7 @@ class BeehiveClient:
             HoneycombConfig(
                 root_dir=self.honeycomb_root,
                 vector_backend=self.vector_backend,
-                vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
+                vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
             )
         )
         return store.list_traces(limit=limit)
@@ -158,7 +158,7 @@ class BeehiveClient:
             HoneycombConfig(
                 root_dir=self.honeycomb_root,
                 vector_backend=self.vector_backend,
-                vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
+                vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
             )
         )
         return store.read_events(trace_id)
@@ -169,7 +169,7 @@ class BeehiveClient:
             HoneycombConfig(
                 root_dir=self.honeycomb_root,
                 vector_backend=self.vector_backend,
-                vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
+                vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
             )
         )
         return store.create_session()
@@ -180,7 +180,7 @@ class BeehiveClient:
             HoneycombConfig(
                 root_dir=self.honeycomb_root,
                 vector_backend=self.vector_backend,
-                vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
+                vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
             )
         )
         return store.list_sessions(limit=limit)
@@ -214,6 +214,6 @@ class BeehiveClient:
 def create_client(
     honeycomb_root: str | Path = ".honeycomb",
     **kwargs: Any,
-) -> BeehiveClient:
-    """Factory for BeehiveClient with sensible defaults."""
-    return BeehiveClient(honeycomb_root=honeycomb_root, **kwargs)
+) -> BeekeeperClient:
+    """Factory for BeekeeperClient with sensible defaults."""
+    return BeekeeperClient(honeycomb_root=honeycomb_root, **kwargs)

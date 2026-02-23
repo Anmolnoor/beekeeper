@@ -88,8 +88,8 @@ class WebSearchWorker(BaseSpecialistWorker):
         self,
         llm_provider: str = "ollama",
         llm_providers: str | None = None,
-        ollama_base_url: str = "http://100.99.106.59:11434",
-        ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
+        ollama_base_url: str = "http://localhost:11434",
+        ollama_model: str = "llama3.2",
         ollama_timeout_seconds: int = 120,
         gemini_api_key: str = "",
         gemini_model: str = "gemini-1.5-flash",
@@ -165,7 +165,7 @@ class WebSearchWorker(BaseSpecialistWorker):
             if assistant_reply is None:
                 assistant_reply = (
                     "I could not reach any configured LLM. "
-                    "Ensure Ollama is running (BEEHIVE_OLLAMA_BASE_URL) and/or BEEHIVE_GEMINI_API_KEY is set."
+                    "Ensure Ollama is running (BEEKEEPER_OLLAMA_BASE_URL) and/or BEEKEEPER_GEMINI_API_KEY is set."
                 )
             return WebSearchOutput(
                 query=query,
@@ -239,7 +239,7 @@ class WebSearchWorker(BaseSpecialistWorker):
         if assistant_reply is None:
             assistant_reply = (
                 f"I could not reach any configured LLM, but I prepared an evidence-backed synthesis for '{query}'. "
-                "Ensure Ollama is running (BEEHIVE_OLLAMA_BASE_URL) and/or BEEHIVE_GEMINI_API_KEY is set."
+                "Ensure Ollama is running (BEEKEEPER_OLLAMA_BASE_URL) and/or BEEKEEPER_GEMINI_API_KEY is set."
             )
         return WebSearchOutput(
             query=query,
@@ -273,6 +273,57 @@ class HeavyComputeWorker(BaseSpecialistWorker):
             sample_size=sample_size,
             aggregate=aggregate,
             notes="Computed deterministic summary metrics over numeric inputs.",
+        ).model_dump(mode="json")
+
+
+class ForgedWorker(BaseSpecialistWorker):
+    """Handles intents with no matching worker or custom-spawned worker kinds. Uses LLM to fulfill the request."""
+    worker_kind = WorkerKind.forged
+    output_model = WebSearchOutput
+
+    def preflight(self, task: TaskEnvelope, context: WorkerContext) -> None:
+        # Accept both forged and custom worker kinds — ForgedWorker is the executor for all custom/spawned workers
+        if task.worker_kind not in (WorkerKind.forged, WorkerKind.custom):
+            raise ValueError(f"worker_kind_mismatch expected={self.worker_kind.value} or custom got={task.worker_kind.value}")
+
+    def __init__(
+        self,
+        llm_providers: str | None = None,
+        ollama_base_url: str = "http://localhost:11434",
+        ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
+        ollama_timeout_seconds: int = 120,
+        gemini_api_key: str = "",
+        gemini_model: str = "gemini-1.5-flash",
+        gemini_timeout_seconds: int = 120,
+        openai_api_key: str = "",
+        openai_model: str = "gpt-4o-mini",
+        openai_base_url: str | None = None,
+        openai_timeout_seconds: int = 120,
+    ) -> None:
+        self.llm_router = build_llm_router(
+            llm_providers=llm_providers,
+            ollama_base_url=ollama_base_url,
+            ollama_model=ollama_model,
+            ollama_timeout_seconds=ollama_timeout_seconds,
+            gemini_api_key=gemini_api_key,
+            gemini_model=gemini_model,
+            gemini_timeout_seconds=gemini_timeout_seconds,
+            openai_api_key=openai_api_key,
+            openai_model=openai_model,
+            openai_base_url=openai_base_url,
+            openai_timeout_seconds=openai_timeout_seconds,
+        )
+
+    def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
+        self._emit_status(context, "Processing with LLM (no matching worker)…")
+        query = str(task.payload.get("query") or task.payload.get("topic") or task.task_type).strip()
+        reply, source = self.llm_router.call(prompt=query, system=None, messages=None)
+        return WebSearchOutput(
+            query=query,
+            evidence=[],
+            assistant_reply=reply or "I could not process this request.",
+            response_source=source,
+            synthesis="Forged worker (LLM direct).",
         ).model_dump(mode="json")
 
 
@@ -341,7 +392,7 @@ class WorkerRuntime:
     ) -> None:
         self.honeycomb = honeycomb
         self.tracer = tracer
-        self._workers: dict[WorkerKind, BaseSpecialistWorker] = {
+        self._workers: dict[WorkerKind | str, BaseSpecialistWorker] = {
             WorkerKind.web_search: WebSearchWorker(
                 llm_provider=llm_provider,
                 llm_providers=llm_providers,
@@ -359,14 +410,37 @@ class WorkerRuntime:
             ),
             WorkerKind.heavy_compute: HeavyComputeWorker(),
             WorkerKind.audit: AuditWorker(),
+            WorkerKind.forged: ForgedWorker(
+                llm_providers=llm_providers,
+                ollama_base_url=ollama_base_url,
+                ollama_model=ollama_model,
+                ollama_timeout_seconds=ollama_timeout_seconds,
+                gemini_api_key=gemini_api_key,
+                gemini_model=gemini_model,
+                gemini_timeout_seconds=gemini_timeout_seconds,
+                openai_api_key=openai_api_key,
+                openai_model=openai_model,
+                openai_base_url=openai_base_url,
+                openai_timeout_seconds=openai_timeout_seconds,
+            ),
         }
+        # WorkerKind.custom routes to ForgedWorker (LLM fallback for auto-spawned workers)
+        self._workers[WorkerKind.custom] = self._workers[WorkerKind.forged]
         if extra_workers:
             for kind, worker in extra_workers.items():
                 self._workers[kind] = worker
         else:
-            plugin_workers = load_worker_plugins(honeycomb.root_dir)
-            for kind, worker in plugin_workers.items():
-                self._workers[kind] = worker
+            self._load_plugin_workers(honeycomb.root_dir)
+
+    def _load_plugin_workers(self, honeycomb_root: Path) -> None:
+        plugin_workers = load_worker_plugins(honeycomb_root)
+        for kind, worker in plugin_workers.items():
+            self._workers[kind] = worker
+
+    def reload_plugins(self, honeycomb_root: Path | None = None) -> None:
+        """Reload worker plugins from disk (e.g. after forge). Merges into _workers."""
+        root = honeycomb_root or self.honeycomb.root_dir
+        self._load_plugin_workers(root)
 
     def direct_chat(
         self,
@@ -390,7 +464,12 @@ class WorkerRuntime:
         ):
             task.status = Status.running
             self.honeycomb.write_task(task)
-            worker = self._workers[task.worker_kind]
+            worker_key = (
+                task.task_type
+                if task.task_type.startswith("forged_") and task.task_type in self._workers
+                else task.worker_kind
+            )
+            worker = self._workers.get(worker_key) or self._workers[WorkerKind.forged]
             self.honeycomb.write_event(
                 task.queen_trace_id,
                 {"kind": "worker_lifecycle", "stage": "preflight", "task_id": task.task_id, "worker_kind": task.worker_kind.value},

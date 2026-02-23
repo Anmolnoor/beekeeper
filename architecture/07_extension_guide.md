@@ -8,8 +8,8 @@ Custom workers let you extend the platform with new task types without modifying
 
 ```python
 # my_workers/summarizer.py
-from beehive.contracts import TaskEnvelope, WorkerKind
-from beehive.worker import BaseSpecialistWorker, WorkerContext
+from beekeeper.contracts import TaskEnvelope, WorkerKind
+from beekeeper.worker import BaseSpecialistWorker, WorkerContext
 from pydantic import BaseModel
 
 class SummaryOutput(BaseModel):
@@ -39,8 +39,8 @@ Create `.honeycomb/workers/plugins.json`:
 ### Step 3: Register via Code
 
 ```python
-from beehive.queen import QueenAgent, QueenConfig
-from beehive.contracts import WorkerKind
+from beekeeper.queen import QueenAgent, QueenConfig
+from beekeeper.contracts import WorkerKind
 from my_workers.summarizer import SummarizerWorker
 
 config = QueenConfig(honeycomb_root=".honeycomb")
@@ -57,7 +57,7 @@ Override `_route_worker_kind()` or register the intent in your worker's skill pr
 ## How to Add a Custom Guardrail
 
 ```python
-from beehive.contracts import PolicyDecision, RuleProfile, TaskEnvelope
+from beekeeper.contracts import PolicyDecision, RuleProfile, TaskEnvelope
 from dataclasses import dataclass
 
 @dataclass
@@ -76,7 +76,7 @@ class ProfanityGuardrail:
 
 Register it when building `GuardrailPolicyEngine`:
 ```python
-from beehive.guardrails import GuardrailPolicyEngine, SchemaGuardrail, PIIGuardrail
+from beekeeper.guardrails import GuardrailPolicyEngine, SchemaGuardrail, PIIGuardrail
 from my_guardrails import ProfanityGuardrail
 
 engine = GuardrailPolicyEngine([
@@ -94,7 +94,7 @@ Skills are the "what can this worker do" profile. They can be defined in code or
 
 ### In Code
 ```python
-from beehive.contracts import SkillProfile
+from beekeeper.contracts import SkillProfile
 
 my_skill = SkillProfile(
     skill_profile_id="skill.summarizer",
@@ -110,14 +110,14 @@ my_skill = SkillProfile(
 ```
 
 ### As Markdown
-Create a `.md` file and use `beehive.skill_loader.load_skills_from_md()` to parse it.
+Create a `.md` file and use `beekeeper.skill_loader.load_skills_from_md()` to parse it.
 
 ---
 
 ## How to Add a Custom Soul Profile
 
 ```python
-from beehive.contracts import SoulProfile
+from beekeeper.contracts import SoulProfile
 
 formal_soul = SoulProfile(
     soul_profile_id="soul.formal",
@@ -137,7 +137,7 @@ formal_soul = SoulProfile(
 Implement the `LLMProvider` abstract class:
 
 ```python
-from beehive.llm_provider import LLMProvider, LLMResponse
+from beekeeper.llm_provider import LLMProvider, LLMResponse
 
 class MyCustomProvider(LLMProvider):
     def chat(
@@ -154,7 +154,7 @@ class MyCustomProvider(LLMProvider):
 
 Build the `LLMRouter` manually:
 ```python
-from beehive.llm_provider import LLMRouter
+from beekeeper.llm_provider import LLMRouter
 router = LLMRouter(providers=[MyCustomProvider(), fallback_provider])
 ```
 
@@ -166,10 +166,10 @@ Templates allow reusable Queen/Worker shapes with fixed profile bundles.
 
 ```bash
 # Export current defaults as templates
-python -m beehive.migrate_blueprints
+python -m beekeeper.migrate_blueprints
 
 # Instantiate a template into a new Queen for a hive
-beehive templates instantiate tpl_xxx --hive hive_yyy --name "Research Queen"
+beekeeper templates instantiate tpl_xxx --hive hive_yyy --name "Research Queen"
 ```
 
 Or via API:
@@ -185,7 +185,7 @@ curl -X POST http://localhost:8787/templates/instantiate \
 
 1. **Store credentials**:
    ```bash
-   beehive channels set myplatform '{"myplatform_bot_token": "token123"}'
+   beekeeper channels set myplatform '{"myplatform_bot_token": "token123"}'
    ```
 
 2. **Add webhook route** in `beekeeper_api/routes.py`:

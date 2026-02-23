@@ -69,14 +69,14 @@ def load_skill_from_md(path: Path, skill_profile_id: str | None = None) -> Skill
 
 
 def discover_skill_md_paths(honeycomb_root: Path) -> list[Path]:
-    """Discover SKILL.md files from .honeycomb/skills/, ~/.beehive/skills/, project skills/."""
+    """Discover SKILL.md files from .honeycomb/skills/, ~/.beekeeper/skills/, project skills/."""
     paths: list[Path] = []
     root = Path(honeycomb_root).resolve()
     project_root = root.parent if root.name == ".honeycomb" else root
 
     dirs = [
         root / "skills",
-        Path.home() / ".beehive" / "skills",
+        Path.home() / ".beekeeper" / "skills",
         project_root / "skills",
     ]
     for d in dirs:

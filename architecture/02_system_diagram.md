@@ -5,14 +5,14 @@
 ```mermaid
 graph TB
     subgraph "Entry Points"
-        CLI["CLI\n(beehive run/chat)"]
+        CLI["CLI\n(beekeeper run/chat)"]
         BKAPI["Beekeeper API\n(:8787)"]
         QAPI["Queen API\n(:8788 OpenAI-compat)"]
-        SDK["BeehiveClient SDK"]
+        SDK["BeekeeperClient SDK"]
         CHANNELS["Channels\n(Slack/Telegram/Discord)"]
     end
 
-    subgraph "Core Agent Runtime (beehive/)"
+    subgraph "Core Agent Runtime (beekeeper/)"
         QUEEN["QueenAgent\nqueen.py"]
         GUARD["GuardrailPolicyEngine\nguardrails.py"]
         SCHED["Scheduler\nscheduler.py"]
@@ -190,7 +190,7 @@ graph TD
 graph LR
     QUEEN["QueenAgent"] -->|"scheduler_backend=inline"| IS["InlineScheduler\n(same process)"]
     QUEEN -->|"scheduler_backend=celery"| CS["CeleryScheduler\n(Redis queue)"]
-    QUEEN -->|"scheduler_backend=temporal"| TS["TemporalBeehiveClient\n(durable workflows)"]
+    QUEEN -->|"scheduler_backend=temporal"| TS["TemporalBeekeeperClient\n(durable workflows)"]
 
     IS --> WR["WorkerRuntime (sync)"]
     CS --> REDIS["Redis :6379"] --> CELERY["Celery Worker Process"]

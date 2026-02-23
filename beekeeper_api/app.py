@@ -4,9 +4,10 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .routes import router
+from .setup import is_fresh_install
 
 # Load .env at module load so QueenConfig/LLM get env vars (works with uvicorn and beekeeper-api)
 def _load_env() -> None:
@@ -37,17 +38,45 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 
 @app.get("/")
-def index() -> JSONResponse:
-    """Health/info endpoint."""
+def index():
+    """Health/info endpoint. Redirects to setup wizard when fresh install."""
+    if is_fresh_install():
+        return RedirectResponse(url="/setup", status_code=302)
     return JSONResponse(
-        {"status": "ok", "message": "Beekeeper API. Dashboard at /dashboard. Configure via CLI: beehive settings, beehive channels."}
+        {"status": "ok", "message": "Beekeeper API. Dashboard at /dashboard. Configure via CLI: beekeeper settings, beekeeper channels."}
     )
 
 
+@app.get("/setup")
+def setup():
+    """First-run setup wizard. Served when fresh install detected."""
+    if not is_fresh_install():
+        return RedirectResponse(url="/dashboard", status_code=302)
+    return FileResponse(_STATIC_DIR / "setup.html")
+
+
 @app.get("/dashboard")
-def dashboard() -> FileResponse:
+def dashboard():
     """Lightweight control dashboard for channels, templates, settings."""
+    if is_fresh_install():
+        return RedirectResponse(url="/setup", status_code=302)
     return FileResponse(_STATIC_DIR / "dashboard.html")
+
+
+@app.get("/audit")
+def audit_page():
+    """Full audit trail page for chronological service invocation logs."""
+    if is_fresh_install():
+        return RedirectResponse(url="/setup", status_code=302)
+    return FileResponse(_STATIC_DIR / "audit.html")
+
+
+@app.get("/trace/{trace_id}")
+def trace_page(trace_id: str):
+    """Trace detail page showing events for a single trace."""
+    if is_fresh_install():
+        return RedirectResponse(url="/setup", status_code=302)
+    return FileResponse(_STATIC_DIR / "trace.html")
 
 
 app.include_router(router)
@@ -62,7 +91,7 @@ def main() -> None:
     import os
     import uvicorn
 
-    port = int(os.getenv("BEEKEEPER_PORT", "8788"))
+    port = int(os.getenv("BEEKEEPER_PORT", "8787"))
     uvicorn.run("beekeeper_api.app:app", host="0.0.0.0", port=port, reload=False)
 
 

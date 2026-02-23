@@ -4,7 +4,7 @@ Restrict which Slack channels, Discord channels, or Telegram chats (and optional
 
 ## Configuration
 
-Add to your channel config via `beehive channels set`:
+Add to your channel config via `beekeeper channels set`:
 
 ```json
 {
@@ -47,14 +47,14 @@ Add to your channel config via `beehive channels set`:
 
 ```bash
 # Allow only specific Slack channels
-beehive channels set slack '{
+beekeeper channels set slack '{
   "slack_bot_token": "xoxb-...",
   "slack_signing_secret": "...",
   "allowed_channel_ids": ["C0TEAMOPS", "C0SUPPORT"]
 }'
 
 # Allow only specific Discord users
-beehive channels set discord '{
+beekeeper channels set discord '{
   "discord_bot_token": "...",
   "discord_public_key": "...",
   "allowed_user_ids": ["123456789", "987654321"]

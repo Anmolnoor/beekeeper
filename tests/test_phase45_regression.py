@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from beehive.honeycomb import HoneycombConfig, HoneycombStore
-from beehive.queen import QueenAgent, QueenConfig
+from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+from beekeeper.queen import QueenAgent, QueenConfig
 
 
 def _make_queen(tmp_path: Path) -> QueenAgent:

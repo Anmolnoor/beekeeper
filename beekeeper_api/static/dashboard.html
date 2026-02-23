@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Beehive Control</title>
+  <title>Beekeeper Control</title>
   <style>
     :root { --bg: #0f0f12; --card: #1a1a1f; --border: #2a2a32; --text: #e8e8ed; --muted: #888; --accent: #7c6ef6; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -20,6 +20,9 @@
     .error { color: #f87171; font-size: 0.875rem; margin-bottom: 0.5rem; }
     .row { display: flex; justify-content: space-between; align-items: center; padding: 0.35rem 0; font-size: 0.875rem; }
     .badge { background: var(--border); padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; }
+    .env-form label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 0.2rem; }
+    .env-form input, .env-form select { width: 100%; padding: 0.5rem; margin-bottom: 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.875rem; }
+    .env-form .row-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
     .status-ok { color: #4ade80; }
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
     .logout { font-size: 0.875rem; color: var(--muted); cursor: pointer; }
@@ -27,12 +30,25 @@
     ul { list-style: none; font-size: 0.875rem; }
     li { padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
     li:last-child { border-bottom: none; }
+    .live-logs { max-height: 200px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 0.75rem; }
+    .live-logs .log-row { display: flex; gap: 0.5rem; padding: 0.25rem 0; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+    .live-logs .log-row:last-child { border-bottom: none; }
+    .service-badge { padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; }
+    .service-queen { background: #7c6ef6; color: white; }
+    .service-redis { background: #dc2626; color: white; }
+    .service-qdrant { background: #059669; color: white; }
+    .service-ollama, .service-gemini, .service-openai { background: #2563eb; color: white; }
+    .service-searxng { background: #ea580c; color: white; }
+    .service-temporal { background: #7c3aed; color: white; }
+    .service-default { background: var(--border); }
+    .logs-toggle { cursor: pointer; user-select: none; }
+    .logs-toggle:hover { color: var(--accent); }
   </style>
 </head>
 <body>
   <div id="app">
     <div id="login-view" class="login card" style="display:none">
-      <h1>Beehive Control</h1>
+      <h1>Beekeeper Control</h1>
       <p class="muted" style="color:var(--muted);font-size:0.875rem;margin-bottom:1rem">Sign in to manage channels, templates, and settings.</p>
       <div id="login-error" class="error"></div>
       <input type="email" id="email" placeholder="Email" autocomplete="email">
@@ -50,7 +66,7 @@
     </div>
     <div id="dashboard-view" style="display:none">
       <div class="header">
-        <h1>Beehive Control</h1>
+        <h1>Beekeeper Control</h1>
         <span class="logout" onclick="logout()">Sign out</span>
       </div>
       <div class="grid">
@@ -70,14 +86,87 @@
           <h2>Health</h2>
           <div id="health-status">Checking…</div>
         </div>
+        <div class="card" style="grid-column: 1 / -1">
+          <h2>Approvals (HITL)</h2>
+          <div id="approvals-list">Loading…</div>
+        </div>
+        <div class="card" style="grid-column: 1 / -1">
+          <h2>Environment</h2>
+          <p style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">Edit LLM and channel settings. Leave secrets as *** to keep unchanged.</p>
+          <div id="env-error" class="error"></div>
+          <div id="env-success" class="success" style="color:#4ade80"></div>
+          <form id="env-form" class="env-form">
+            <div class="row-fields">
+              <div>
+                <label>LLM Provider</label>
+                <select id="env-llm_provider" name="llm_provider">
+                  <option value="ollama">Ollama (local)</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="openai">OpenAI</option>
+                </select>
+              </div>
+              <div id="env-ollama-wrap">
+                <label>Ollama Base URL</label>
+                <input type="text" id="env-ollama_base_url" name="ollama_base_url" placeholder="http://localhost:11434">
+              </div>
+            </div>
+            <div class="row-fields">
+              <div id="env-ollama-model-wrap">
+                <label>Ollama Model</label>
+                <input type="text" id="env-ollama_model" name="ollama_model" placeholder="Model name">
+              </div>
+              <div></div>
+            </div>
+            <div class="row-fields">
+              <div>
+                <label>Gemini API Key</label>
+                <input type="password" id="env-gemini_api_key" name="gemini_api_key" placeholder="*** = keep unchanged">
+              </div>
+              <div>
+                <label>OpenAI API Key</label>
+                <input type="password" id="env-openai_api_key" name="openai_api_key" placeholder="*** = keep unchanged">
+              </div>
+            </div>
+            <div class="row-fields">
+              <div>
+                <label>Telegram Bot Token</label>
+                <input type="password" id="env-telegram_bot_token" name="telegram_bot_token" placeholder="*** = keep unchanged">
+              </div>
+              <div>
+                <label>WhatsApp Access Token</label>
+                <input type="password" id="env-whatsapp_access_token" name="whatsapp_access_token" placeholder="*** = keep unchanged">
+              </div>
+            </div>
+            <div class="row-fields">
+              <div>
+                <label>WhatsApp Phone Number ID</label>
+                <input type="text" id="env-whatsapp_phone_number_id" name="whatsapp_phone_number_id" placeholder="Leave blank to skip">
+              </div>
+              <div></div>
+            </div>
+            <button type="submit" style="padding:0.5rem 1rem;background:var(--accent);border:none;border-radius:6px;color:white;font-weight:500;cursor:pointer">Save Environment</button>
+          </form>
+          <p style="font-size:0.7rem;color:var(--muted);margin-top:0.5rem">Restart beekeeper-api and queen-api for changes to take effect.</p>
+        </div>
       </div>
       <div class="card">
         <h2>Quick links</h2>
         <p style="font-size:0.875rem;color:var(--muted)">
           Chat: <a href="http://localhost:3000" target="_blank" rel="noopener" style="color:var(--accent)">Open WebUI</a> &middot;
-          CLI: <code>beehive channels list</code> &middot;
-          <code>beehive templates list</code>
+          CLI: <code>beekeeper channels list</code> &middot;
+          <code>beekeeper templates list</code>
         </p>
+      </div>
+      <div class="card">
+        <h2 class="logs-toggle" onclick="toggleLiveLogs()">
+          Live Logs <span id="logs-chevron">▸</span>
+        </h2>
+        <p style="font-size:0.75rem;color:var(--muted);margin-bottom:0.5rem">
+          Service invocations (Redis, Queen, Qdrant, etc.). <a href="/audit" style="color:var(--accent)">View full audit</a>
+        </p>
+        <div id="live-logs-panel" class="live-logs" style="display:none">
+          <div id="live-logs-content">Loading…</div>
+        </div>
       </div>
     </div>
   </div>
@@ -90,7 +179,7 @@
       if (typeof window !== 'undefined' && window.BEEKEEPER_API_URL) return window.BEEKEEPER_API_URL.replace(/\/$/, '');
       return '';
     })();
-    function token() { return localStorage.getItem('beehive_token'); }
+    function token() { return localStorage.getItem('beekeeper_token'); }
     function api(url, opts = {}) {
       const h = { ...opts.headers };
       if (token()) h['Authorization'] = 'Bearer ' + token();
@@ -116,7 +205,7 @@
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(data.detail || data.message || 'Login failed');
-        localStorage.setItem('beehive_token', data.access_token);
+        localStorage.setItem('beekeeper_token', data.access_token);
         showDashboard();
       } catch (e) {
         const msg = e.message || (e.name === 'TypeError' && e.cause ? 'Network error: cannot reach API' : String(e));
@@ -135,7 +224,7 @@
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(data.detail || data.message || 'Registration failed');
-        localStorage.setItem('beehive_token', data.access_token);
+        localStorage.setItem('beekeeper_token', data.access_token);
         showDashboard();
       } catch (e) {
         const msg = e.message || (e.name === 'TypeError' && e.cause ? 'Network error: cannot reach API' : String(e));
@@ -143,7 +232,7 @@
       }
     }
     function logout() {
-      localStorage.removeItem('beehive_token');
+      localStorage.removeItem('beekeeper_token');
       document.getElementById('login-view').style.display = 'block';
       document.getElementById('register-view').style.display = 'none';
       document.getElementById('dashboard-view').style.display = 'none';
@@ -151,7 +240,7 @@
     async function showDashboard() {
       const me = await api('/api/auth/me');
       if (me.status === 401) {
-        localStorage.removeItem('beehive_token');
+        localStorage.removeItem('beekeeper_token');
         document.getElementById('login-view').style.display = 'block';
         document.getElementById('register-view').style.display = 'none';
         document.getElementById('dashboard-view').style.display = 'none';
@@ -162,12 +251,75 @@
       document.getElementById('dashboard-view').style.display = 'block';
       loadCards();
     }
+    async function approveReview(reviewId) {
+      const r = await api('/api/approvals/' + reviewId + '/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approver: 'dashboard' }) });
+      if (r.ok) loadCards();
+    }
+    async function rejectReview(reviewId) {
+      const r = await api('/api/approvals/' + reviewId + '/reject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approver: 'dashboard' }) });
+      if (r.ok) loadCards();
+    }
+    function syncEnvProviderFields() {
+      const v = document.getElementById('env-llm_provider')?.value;
+      const ollamaWrap = document.getElementById('env-ollama-wrap');
+      const modelWrap = document.getElementById('env-ollama-model-wrap');
+      if (ollamaWrap) ollamaWrap.style.display = v === 'ollama' ? 'block' : 'none';
+      if (modelWrap) modelWrap.style.display = v === 'ollama' ? 'block' : 'none';
+    }
+    async function loadEnvConfig() {
+      try {
+        const r = await api('/api/env');
+        if (!r.ok) return;
+        const cfg = await r.json();
+        const set = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val || ''; };
+        set('env-llm_provider', cfg.llm_provider);
+        set('env-ollama_base_url', cfg.ollama_base_url);
+        set('env-ollama_model', cfg.ollama_model);
+        set('env-gemini_api_key', cfg.gemini_api_key);
+        set('env-openai_api_key', cfg.openai_api_key);
+        set('env-telegram_bot_token', cfg.telegram_bot_token);
+        set('env-whatsapp_access_token', cfg.whatsapp_access_token);
+        set('env-whatsapp_phone_number_id', cfg.whatsapp_phone_number_id);
+        syncEnvProviderFields();
+      } catch (_) {}
+    }
+    document.getElementById('env-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      document.getElementById('env-error').textContent = '';
+      document.getElementById('env-success').textContent = '';
+      const data = {
+        llm_provider: form.llm_provider.value,
+        ollama_base_url: form.ollama_base_url?.value || 'http://localhost:11434',
+        ollama_model: form.ollama_model?.value || 'catsarethebest/qwen2.5-N2:1.5b',
+        gemini_api_key: form.gemini_api_key?.value || '',
+        openai_api_key: form.openai_api_key?.value || '',
+        telegram_bot_token: form.telegram_bot_token?.value || '',
+        whatsapp_access_token: form.whatsapp_access_token?.value || '',
+        whatsapp_phone_number_id: form.whatsapp_phone_number_id?.value || '',
+        org_name: 'Default Organization',
+        hive_name: 'Main Hive',
+        admin_email: '',
+        admin_password: '',
+      };
+      try {
+        const r = await api('/api/env', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        const res = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(res.detail || res.message || 'Update failed');
+        document.getElementById('env-success').textContent = res.message || 'Saved.';
+        loadEnvConfig();
+      } catch (err) {
+        document.getElementById('env-error').textContent = err.message || String(err);
+      }
+    });
+    document.getElementById('env-llm_provider')?.addEventListener('change', syncEnvProviderFields);
     async function loadCards() {
-      const [chRes, tplRes, orgRes, healthRes] = await Promise.all([
+      const [chRes, tplRes, orgRes, healthRes, approvalsRes] = await Promise.all([
         api('/api/channels'),
         api('/api/templates'),
         api('/api/orgs'),
-        api('/healthz')
+        api('/healthz'),
+        api('/api/approvals')
       ]);
       document.getElementById('channels-list').innerHTML = chRes.ok
         ? ((await chRes.json()).channels || []).map(c => `<div class="row"><span>${c.channel || '-'}</span><span class="badge">configured</span></div>`).join('') || '<div class="row">No channels</div>'
@@ -183,6 +335,63 @@
       document.getElementById('health-status').innerHTML = healthRes.ok
         ? '<span class="status-ok">OK</span>'
         : '<span class="error">Unhealthy</span>';
+      const approvalsData = approvalsRes.ok ? await approvalsRes.json() : {};
+      const approvals = approvalsData.approvals || [];
+      document.getElementById('approvals-list').innerHTML = approvalsRes.ok
+        ? (approvals.length
+            ? approvals.map(a => `<div class="row" style="align-items:center;gap:0.5rem"><span>${a.task_id || a.review_id} – ${(a.reason || '').slice(0,40)}</span><span><button onclick="approveReview('${a.review_id}')" style="padding:0.2rem 0.5rem;font-size:0.75rem;background:var(--accent);border:none;border-radius:4px;color:white;cursor:pointer">Approve</button> <button onclick="rejectReview('${a.review_id}')" style="padding:0.2rem 0.5rem;font-size:0.75rem;background:var(--border);border:none;border-radius:4px;color:var(--text);cursor:pointer">Reject</button></span></div>`).join('')
+            : '<div class="row">No pending approvals</div>')
+        : '<div class="error">Unauthorized</div>';
+      loadEnvConfig();
+      loadAuditLogs();
+    }
+    let liveLogsPoll = null;
+    function toggleLiveLogs() {
+      const panel = document.getElementById('live-logs-panel');
+      const chevron = document.getElementById('logs-chevron');
+      if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        panel.dataset.expanded = '1';
+        chevron.textContent = '▾';
+        loadAuditLogs();
+        if (liveLogsPoll) clearInterval(liveLogsPoll);
+        liveLogsPoll = setInterval(loadAuditLogs, 5000);
+      } else {
+        panel.style.display = 'none';
+        delete panel.dataset.expanded;
+        chevron.textContent = '▸';
+        if (liveLogsPoll) { clearInterval(liveLogsPoll); liveLogsPoll = null; }
+      }
+    }
+    function serviceBadgeClass(s) {
+      if (!s) return 'service-default';
+      const k = 'service-' + String(s).toLowerCase();
+      if (document.querySelector('style')?.textContent?.includes(k)) return k;
+      return 'service-default';
+    }
+    async function loadAuditLogs() {
+      const el = document.getElementById('live-logs-content');
+      if (!el) return;
+      try {
+        const r = await api('/api/audit/logs?limit=20');
+        if (!r.ok) { el.textContent = 'Unauthorized'; return; }
+        const data = await r.json();
+        const logs = data.logs || [];
+        if (logs.length === 0) {
+          el.innerHTML = '<div class="log-row" style="color:var(--muted)">No logs yet. Trigger a request to see activity.</div>';
+        } else {
+          el.innerHTML = logs.map(l => {
+            const svc = l.service || '-';
+            const cls = serviceBadgeClass(svc);
+            const time = l.at ? new Date(l.at).toLocaleTimeString() : '-';
+            const src = l.source ? `<span style="color:var(--muted)">${l.source}</span>` : '';
+            const trace = l.trace_id ? `<a href="/trace/${l.trace_id}" style="color:var(--accent);font-size:0.65rem">${l.trace_id.slice(0,12)}…</a>` : '';
+            return `<div class="log-row"><span class="service-badge ${cls}">${svc}</span><span>${time}</span>${src}${trace ? ' ' + trace : ''}</div>`;
+          }).join('');
+        }
+      } catch (_) {
+        el.textContent = 'Failed to load logs.';
+      }
     }
     (async function init() {
       const base = API || window.location.origin;

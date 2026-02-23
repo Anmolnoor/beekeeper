@@ -8,6 +8,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from .audit_logger import log_service_call
+
 
 def _domain_from_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
@@ -54,6 +56,7 @@ class SearxngAdapter:
     def search(self, query: str, allowed_domains: list[str], limit: int = 5) -> list[dict[str, Any]]:
         if not query.strip():
             return []
+        log_service_call("searxng", "called", source="worker")
         q = query.strip()
         if allowed_domains:
             domain_filter = " OR ".join(f"site:{domain}" for domain in allowed_domains)
@@ -98,7 +101,7 @@ class SearxngAdapter:
         req = urllib.request.Request(
             url=url,
             method="GET",
-            headers={"User-Agent": "beehive-agent/0.1", "Accept": "text/html,application/xhtml+xml"},
+            headers={"User-Agent": "beekeeper-agent/0.1", "Accept": "text/html,application/xhtml+xml"},
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:

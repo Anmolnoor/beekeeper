@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from beehive.honeycomb import HoneycombConfig, HoneycombStore
-from beehive.ops import compute_ops_metrics
-from beehive.queen import QueenAgent, QueenConfig
-from beehive.web_adapters import WebAdapterError
-from beehive.worker import WebSearchWorker, WorkerContext, make_worker_identity
-from beehive.contracts import RuleProfile, SkillProfile, SoulProfile, TaskEnvelope, WorkerKind
+from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+from beekeeper.ops import compute_ops_metrics
+from beekeeper.queen import QueenAgent, QueenConfig
+from beekeeper.web_adapters import WebAdapterError
+from beekeeper.worker import WebSearchWorker, WorkerContext, make_worker_identity
+from beekeeper.contracts import RuleProfile, SkillProfile, SoulProfile, TaskEnvelope, WorkerKind
 
 
 def _worker_context() -> WorkerContext:

@@ -1,20 +1,20 @@
 # Extension Points: Pluggable Workers and Guardrails
 
-Beehive supports pluggable workers and guardrails via JSON config and dynamic class loading.
+Beekeeper supports pluggable workers and guardrails via JSON config and dynamic class loading.
 
-## Package Ecosystem: `beehive install`
+## Package Ecosystem: `beekeeper install`
 
 Install worker/guardrail packages from PyPI:
 
 ```bash
-beehive install <package>
-beehive install --list   # List installed plugins
+beekeeper install <package>
+beekeeper install --list   # List installed plugins
 ```
 
 Packages declare workers/guardrails via:
-1. **Entry points** in `pyproject.toml`: `[project.entry-points."beehive.workers"]`, `[project.entry-points."beehive.guardrails"]`
-2. **beehive.json** in the package
-3. **`[tool.beehive]`** in `pyproject.toml` (Python 3.11+)
+1. **Entry points** in `pyproject.toml`: `[project.entry-points."beekeeper.workers"]`, `[project.entry-points."beekeeper.guardrails"]`
+2. **beekeeper.json** in the package
+3. **`[tool.beekeeper]`** in `pyproject.toml` (Python 3.11+)
 
 After install, workers are registered in `.honeycomb/workers/plugins.json` and optionally in `.honeycomb/workers/registry.json`.
 
@@ -39,7 +39,7 @@ Add workers by creating `.honeycomb/workers/plugins.json`:
 - `worker_kind`: One of `web_search`, `heavy_compute`, `audit`, `monitor`, `logger`, `custom`
 
 Your worker must:
-- Subclass `beehive.worker.BaseSpecialistWorker`
+- Subclass `beekeeper.worker.BaseSpecialistWorker`
 - Set `worker_kind` and `output_model` (Pydantic model)
 - Implement `execute(task, context) -> dict`
 
@@ -68,8 +68,8 @@ Your guardrail must implement `evaluate(task: TaskEnvelope, rule_profile: RulePr
 
 ```python
 # my_workers/custom.py
-from beehive.worker import BaseSpecialistWorker
-from beehive.contracts import WorkerKind, TaskEnvelope, WorkerContext
+from beekeeper.worker import BaseSpecialistWorker
+from beekeeper.contracts import WorkerKind, TaskEnvelope, WorkerContext
 from pydantic import BaseModel
 
 class CustomOutput(BaseModel):

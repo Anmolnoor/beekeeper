@@ -1,6 +1,6 @@
 # Agent Skills Standard Alignment
 
-Beehive `SkillProfile` aligns with the Agent Skills standard (Cursor/Codex SKILL.md format) for consistent skill definition across agent platforms.
+Beekeeper `SkillProfile` aligns with the Agent Skills standard (Cursor/Codex SKILL.md format) for consistent skill definition across agent platforms.
 
 ## Alignment
 

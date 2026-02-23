@@ -1,6 +1,6 @@
 # 03 — Core Modules Reference
 
-All modules live in `beehive/`. Each section covers purpose, key classes/functions, and how they fit into the system.
+All modules live in `beekeeper/`. Each section covers purpose, key classes/functions, and how they fit into the system.
 
 ---
 
@@ -174,8 +174,8 @@ Maps error strings to `RetryCategory`, applies exponential backoff (capped at 8s
 ### `LLMRouter`
 - `call(prompt, system, messages, model_tier, model_override)` → `(text, source)`
 - Tries providers in order; returns first success
-- `model_tier` ∈ {`economy`, `standard`, `premium`} resolves model from env vars like `BEEHIVE_OLLAMA_MODEL_PREMIUM`
-- `LLMRouter.from_env()` builds router from `BEEHIVE_LLM_PROVIDERS` env var
+- `model_tier` ∈ {`economy`, `standard`, `premium`} resolves model from env vars like `BEEKEEPER_OLLAMA_MODEL_PREMIUM`
+- `LLMRouter.from_env()` builds router from `BEEKEEPER_LLM_PROVIDERS` env var
 
 ---
 
@@ -225,7 +225,7 @@ Maps error strings to `RetryCategory`, applies exponential backoff (capped at 8s
 
 ## `celery_app.py` — Celery Integration
 
-**Purpose**: Registers the `beehive.execute_worker_task` Celery task.
+**Purpose**: Registers the `beekeeper.execute_worker_task` Celery task.
 
 - Reads broker/backend URLs from env
 - Task calls `execute_task_serialized()` from `worker.py`
@@ -237,7 +237,7 @@ Maps error strings to `RetryCategory`, applies exponential backoff (capped at 8s
 **Purpose**: Durable task execution via Temporal workflows.
 
 - `TemporalConfig` — endpoint, namespace, task queue, fallback endpoints
-- `TemporalBeehiveClient` — wraps Temporal client for workflow submission
+- `TemporalBeekeeperClient` — wraps Temporal client for workflow submission
 - Activities map to `WorkerRuntime.run_once()`
 
 ---
@@ -246,7 +246,7 @@ Maps error strings to `RetryCategory`, applies exponential backoff (capped at 8s
 
 **Purpose**: High-level client for programmatic use.
 
-- `BeehiveClient` / `create_client()` — simple wrapper around `QueenAgent.run()`
+- `BeekeeperClient` / `create_client()` — simple wrapper around `QueenAgent.run()`
 - Suitable for embedding in other Python applications
 
 ---
@@ -323,5 +323,5 @@ Traits: constitutional helpfulness/honesty/harmlessness, explicit uncertainty re
 | `migrate_blueprints.py` | One-time migration of default blueprints into template store |
 | `user_memory.py` | Per-user memory embedding and retrieval |
 | `trace_compaction.py` | Compacts old trace JSONL files |
-| `runner.py` | CLI entry point — all `beehive` subcommands implemented here |
+| `runner.py` | CLI entry point — all `beekeeper` subcommands implemented here |
 | `demo.py` | Demo scenarios for blocked, approved, and optimized task paths |

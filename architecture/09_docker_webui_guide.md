@@ -1,7 +1,7 @@
 # 09 — Running with Docker Compose & Open WebUI
 
 Chat with the Queen through a browser using Open WebUI, backed by the full
-Beehive stack (Qdrant vector store, SearXNG web search, Queen API).
+Beekeeper stack (Qdrant vector store, SearXNG web search, Queen API).
 
 ---
 
@@ -11,13 +11,13 @@ Beehive stack (Qdrant vector store, SearXNG web search, Queen API).
 |-------------|-------|
 | Docker Desktop running | `docker info` |
 | `.env` file configured | `cp .env.example .env` then fill in LLM keys |
-| Project installed | `pip install -e .` (for the `beehive` CLI) |
+| Project installed | `pip install -e .` (for the `beekeeper` CLI) |
 
 > [!IMPORTANT]
 > You must set at least **one LLM provider** in `.env`:
-> - Ollama: `BEEHIVE_OLLAMA_BASE_URL=http://<host>:11434`
-> - Gemini: `BEEHIVE_GEMINI_API_KEY=your-key`
-> - OpenAI: `BEEHIVE_OPENAI_API_KEY=your-key`
+> - Ollama: `BEEKEEPER_OLLAMA_BASE_URL=http://<host>:11434`
+> - Gemini: `BEEKEEPER_GEMINI_API_KEY=your-key`
+> - OpenAI: `BEEKEEPER_OPENAI_API_KEY=your-key`
 
 ---
 
@@ -31,10 +31,10 @@ cp .env.example .env
 # (open .env and fill in your LLM provider key)
 
 # Run setup wizard
-beehive setup
+beekeeper setup
 ```
 
-`beehive setup` checks your environment, initialises the default tenant, and
+`beekeeper setup` checks your environment, initialises the default tenant, and
 verifies Docker services are reachable.
 
 ---
@@ -44,7 +44,7 @@ verifies Docker services are reachable.
 ### Option A — One command (recommended)
 
 ```bash
-beehive up --with-open-webui
+beekeeper up --with-open-webui
 ```
 
 This starts:
@@ -52,32 +52,34 @@ This starts:
 - `qdrant` (vector memory)
 - `searxng` (web search)
 - `temporal` (durable scheduling)
+- `beekeeper-api` → **`http://localhost:8787`** (setup wizard, dashboard)
 - `queen-api` → **`http://localhost:8788`**
 - `open-webui` → **`http://localhost:3000`** ← chat here
 
 ### Option B — Docker Compose directly
 
 ```bash
-docker-compose up -d redis qdrant searxng temporal queen-api open-webui
+docker-compose up -d redis qdrant searxng temporal beekeeper-api queen-api open-webui
 ```
 
 ### Option C — Minimal (no Temporal/Celery)
 
 ```bash
-docker-compose up -d qdrant searxng queen-api open-webui
+docker-compose up -d qdrant searxng beekeeper-api queen-api open-webui
 ```
 
 > [!NOTE]
-> Omitting `temporal` and `redis` is fine when `BEEHIVE_SCHEDULER_BACKEND=inline`
+> Omitting `temporal` and `redis` is fine when `BEEKEEPER_SCHEDULER_BACKEND=inline`
 > (the default). The Queen runs tasks in-process without a queue.
 
 ---
 
 ## Step 3 — Open the UI
 
-Go to **[http://localhost:3000](http://localhost:3000)**
+- **Setup / Dashboard**: [http://localhost:8787](http://localhost:8787) — first-run wizard and Beekeeper control panel
+- **Chat**: [http://localhost:3000](http://localhost:3000) — Open WebUI
 
-On first launch, create an admin account (any username/password — it's local).
+On first launch of Open WebUI, create an admin account (any username/password — it's local).
 
 ---
 
@@ -88,12 +90,12 @@ On first launch, create an admin account (any username/password — it's local).
 
    | Field | Value |
    |-------|-------|
-   | Name | `Beehive Queen` |
+   | Name | `Beekeeper Queen` |
    | Base URL | `http://host.docker.internal:8788/v1` |
    | API Key | `any` (not validated) |
 
 3. Click **Verify → Save**
-4. In the chat, open the model picker and select **`beehive-queen`**
+4. In the chat, open the model picker and select **`beekeeper-queen`**
 
 > [!TIP]
 > `host.docker.internal` lets the Open WebUI container reach the Queen API
@@ -114,7 +116,7 @@ Summarise the concept of RAG for me
 ```
 
 To trigger **web search**, the Queen looks for cues like "search for",
-"look up", or "find". Or use the `X-Beehive-Intent` header from the API
+"look up", or "find". Or use the `X-Beekeeper-Intent` header from the API
 to explicitly set the intent.
 
 ---
@@ -160,13 +162,16 @@ curl -X POST http://localhost:8788/v1/actions \
 
 ```bash
 # Service status
-beehive ps
+beekeeper ps
+
+# Beekeeper API logs (dashboard, setup)
+docker logs beekeeper-api -f
 
 # Queen API logs
-docker logs beehive-queen-api -f
+docker logs beekeeper-queen-api -f
 
 # Open WebUI logs
-docker logs beehive-open-webui -f
+docker logs beekeeper-open-webui -f
 
 # Health check
 curl http://localhost:8788/health
@@ -177,7 +182,7 @@ curl http://localhost:8788/health
 ## Step 8 — Stop everything
 
 ```bash
-beehive down
+beekeeper down
 # or
 docker-compose down
 ```
@@ -203,7 +208,7 @@ docker-compose down
 | Problem | Fix |
 |---------|-----|
 | Open WebUI can't reach Queen API | Use `http://host.docker.internal:8788/v1` not `localhost` |
-| `beehive-queen` model not shown | Re-verify the connection in Settings → Connections |
-| LLM not responding | Check `BEEHIVE_OLLAMA_BASE_URL` or API key in `.env` |
+| `beekeeper-queen` model not shown | Re-verify the connection in Settings → Connections |
+| LLM not responding | Check `BEEKEEPER_OLLAMA_BASE_URL` or API key in `.env` |
 | Port 3000 in use | Edit `docker-compose.yml` → change `3000:8080` to e.g. `3001:8080` |
-| Images out of date | Run `beehive rebuild` to rebuild with latest code |
+| Images out of date | Run `beekeeper rebuild` to rebuild with latest code |

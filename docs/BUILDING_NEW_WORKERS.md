@@ -2,18 +2,18 @@
 
 To support dynamic worker creation, you can either **install a plugin package** or **add workers to the core codebase**.
 
-## Option A: Install a Worker Package (`beehive install`)
+## Option A: Install a Worker Package (`beekeeper install`)
 
 The fastest way to add workers is to install a package that declares workers via extension points:
 
 ```bash
-beehive install <package>           # Install from PyPI
-beehive install --list              # List installed plugins
-beehive install -l ./local-path     # Install to project-local .beehive/workers/
-beehive list-workers                # Show built-in + installed workers
+beekeeper install <package>           # Install from PyPI
+beekeeper install --list              # List installed plugins
+beekeeper install -l ./local-path     # Install to project-local .beekeeper/workers/
+beekeeper list-workers                # Show built-in + installed workers
 ```
 
-Packages register workers via `beehive.workers` entry points in `pyproject.toml` or via `beehive.json`. After install, workers are registered in `.honeycomb/workers/plugins.json`.
+Packages register workers via `beekeeper.workers` entry points in `pyproject.toml` or via `beekeeper.json`. After install, workers are registered in `.honeycomb/workers/plugins.json`.
 
 **See [EXTENSION_POINTS.md](EXTENSION_POINTS.md)** for the full plugin contract, entry point format, and manual plugin config (`.honeycomb/workers/plugins.json`).
 
@@ -21,7 +21,7 @@ Packages register workers via `beehive.workers` entry points in `pyproject.toml`
 
 ## Option B: Add Workers to Core Codebase
 
-If you are contributing to Beehive or need full control, follow these steps. The registry defines **when** workers are used (routing rules); the implementations live in code.
+If you are contributing to Beekeeper or need full control, follow these steps. The registry defines **when** workers are used (routing rules); the implementations live in code.
 
 ## Checklist
 
@@ -52,7 +52,7 @@ class YourWorker(BaseSpecialistWorker):
         return YourOutput(...).model_dump(mode="json")
 ```
 
-Define `YourOutput` in `beehive/contracts.py` (Pydantic `BaseModel`) if needed.
+Define `YourOutput` in `beekeeper/contracts.py` (Pydantic `BaseModel`) if needed.
 
 ### 3. Register in WorkerRuntime (worker.py)
 
@@ -190,5 +190,5 @@ return [WorkerKind.web_search, WorkerKind.heavy_compute, WorkerKind.audit, Worke
 
 ## Pluggable Workers vs Core Workers
 
-- **Pluggable workers** (via `beehive install` or `.honeycomb/workers/plugins.json`): Loaded at runtime from installed packages or JSON config. No core code changes. See [EXTENSION_POINTS.md](EXTENSION_POINTS.md).
+- **Pluggable workers** (via `beekeeper install` or `.honeycomb/workers/plugins.json`): Loaded at runtime from installed packages or JSON config. No core code changes. See [EXTENSION_POINTS.md](EXTENSION_POINTS.md).
 - **Core workers** (this guide): Require edits to `contracts.py`, `worker.py`, `worker_registry.py`, etc. Use when you need to modify the Queen routing logic, add built-in guardrails, or contribute to the platform.

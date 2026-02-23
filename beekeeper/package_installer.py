@@ -1,8 +1,8 @@
-"""Package ecosystem: beehive install for workers and guardrails.
+"""Package ecosystem: beekeeper install for workers and guardrails.
 
-Enables `beehive install <package>` to:
+Enables `beekeeper install <package>` to:
 - pip install the package
-- Discover workers/guardrails via package metadata ([tool.beehive] in pyproject.toml or beehive.json)
+- Discover workers/guardrails via package metadata ([tool.beekeeper] in pyproject.toml or beekeeper.json)
 - Register in .honeycomb/workers/plugins.json and .honeycomb/guardrails/plugins.json
 - Optionally add registry entry for workers
 """
@@ -27,26 +27,26 @@ def _run_pip_install(package: str, editable: bool = False) -> bool:
 
 
 def _find_package_metadata(package_name: str) -> dict[str, Any] | None:
-    """Find beehive metadata from installed package. Returns None if not found."""
+    """Find beekeeper metadata from installed package. Returns None if not found."""
     try:
         import importlib.metadata
         dist = importlib.metadata.distribution(package_name)
     except importlib.metadata.PackageNotFoundError:
         return None
 
-    # 1. Check for beehive entry points
+    # 1. Check for beekeeper entry points
     workers: list[dict[str, str]] = []
     guardrails: list[dict[str, str]] = []
     try:
         eps = dist.entry_points or []
         if hasattr(eps, "select"):
-            for ep in eps.select(group="beehive.workers"):
+            for ep in eps.select(group="beekeeper.workers"):
                 workers.append({
                     "module_path": ep.module,
                     "class_name": ep.attr or ep.name.split(".")[-1],
                     "worker_kind": ep.name.split(".")[0] if "." in ep.name else "custom",
                 })
-            for ep in eps.select(group="beehive.guardrails"):
+            for ep in eps.select(group="beekeeper.guardrails"):
                 guardrails.append({
                     "module_path": ep.module,
                     "class_name": ep.attr or ep.name.split(".")[-1],
@@ -54,13 +54,13 @@ def _find_package_metadata(package_name: str) -> dict[str, Any] | None:
         else:
             for ep in eps:
                 grp = getattr(ep, "group", "")
-                if grp == "beehive.workers":
+                if grp == "beekeeper.workers":
                     workers.append({
                         "module_path": getattr(ep, "module", ""),
                         "class_name": getattr(ep, "attr", "") or (ep.name.split(".")[-1] if ep.name else ""),
                         "worker_kind": "custom",
                     })
-                elif grp == "beehive.guardrails":
+                elif grp == "beekeeper.guardrails":
                     guardrails.append({
                         "module_path": getattr(ep, "module", ""),
                         "class_name": getattr(ep, "attr", "") or (ep.name.split(".")[-1] if ep.name else ""),
@@ -71,11 +71,11 @@ def _find_package_metadata(package_name: str) -> dict[str, Any] | None:
     if workers or guardrails:
         return {"workers": workers, "guardrails": guardrails}
 
-    # 2. Check for beehive.json in package
+    # 2. Check for beekeeper.json in package
     try:
         files = dist.files or []
         for f in files:
-            if f.name.endswith("beehive.json"):
+            if f.name.endswith("beekeeper.json"):
                 path = dist.locate_file(f)
                 if path and Path(path).exists():
                     raw = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -83,7 +83,7 @@ def _find_package_metadata(package_name: str) -> dict[str, Any] | None:
     except Exception:
         pass
 
-    # 3. Check pyproject.toml [tool.beehive]
+    # 3. Check pyproject.toml [tool.beekeeper]
     try:
         if dist.files:
             for f in dist.files:
@@ -95,7 +95,7 @@ def _find_package_metadata(package_name: str) -> dict[str, Any] | None:
                             import tomllib  # Python 3.11+
                             with open(proj_path, "rb") as fp:
                                 proj = tomllib.load(fp)
-                            tool = proj.get("tool", {}).get("beehive", {})
+                            tool = proj.get("tool", {}).get("beekeeper", {})
                             if tool:
                                 return tool
                     break
@@ -166,7 +166,7 @@ def install_package(
     registry: bool = True,
 ) -> tuple[bool, str]:
     """
-    Install a beehive package (workers/guardrails).
+    Install a beekeeper package (workers/guardrails).
     Returns (success, message).
     """
     if not package or not package.strip():
@@ -177,12 +177,12 @@ def install_package(
     if not _run_pip_install(pkg, editable=editable):
         return False, f"pip install failed for {pkg}"
 
-    # Normalize package name for metadata lookup (e.g. "beehive-worker-xyz" -> "beehive_worker_xyz")
+    # Normalize package name for metadata lookup (e.g. "beekeeper-worker-xyz" -> "beekeeper_worker_xyz")
     lookup_name = pkg.replace("-", "_").split("[")[0].split("==")[0]
 
     meta = _find_package_metadata(lookup_name)
     if not meta:
-        return True, f"Installed {pkg} (no beehive workers/guardrails metadata found)"
+        return True, f"Installed {pkg} (no beekeeper workers/guardrails metadata found)"
 
     workers = meta.get("workers", [])
     guardrails = meta.get("guardrails", [])
@@ -229,16 +229,16 @@ def install_package(
 
 
 def _plugin_roots(honeycomb_root: Path) -> list[Path]:
-    """Return plugin search roots: honeycomb_root first, then project-local .beehive if present."""
+    """Return plugin search roots: honeycomb_root first, then project-local .beekeeper if present."""
     roots = [honeycomb_root]
-    beehive_dir = honeycomb_root.resolve().parent / ".beehive"
-    if beehive_dir.exists():
-        roots.append(beehive_dir)
+    beekeeper_dir = honeycomb_root.resolve().parent / ".beekeeper"
+    if beekeeper_dir.exists():
+        roots.append(beekeeper_dir)
     return roots
 
 
 def list_installed_plugins(honeycomb_root: Path) -> dict[str, list[dict[str, Any]]]:
-    """List currently registered workers and guardrails from plugins.json (including .beehive/ if present)."""
+    """List currently registered workers and guardrails from plugins.json (including .beekeeper/ if present)."""
     out: dict[str, list[dict[str, Any]]] = {"workers": [], "guardrails": []}
     seen_workers: set[tuple[str, str]] = set()
     seen_guardrails: set[tuple[str, str]] = set()

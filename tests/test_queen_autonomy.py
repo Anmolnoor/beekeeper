@@ -6,10 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from beehive.contracts import QueenActionRequest, QueenActionResult
-from beehive.honeycomb import HoneycombConfig, HoneycombStore
-from beehive.queen import QueenAgent, QueenConfig
-from beehive.queen_actions import (
+from beekeeper.contracts import QueenActionRequest, QueenActionResult
+from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+from beekeeper.queen import QueenAgent, QueenConfig
+from beekeeper.queen_actions import (
     ActionContext,
     QueenActionLoop,
     QueenActionRegistry,
@@ -17,8 +17,8 @@ from beehive.queen_actions import (
     _action_spawn_worker,
     build_default_action_registry,
 )
-from beehive.user_memory import extract_and_save_queen_memories
-from beehive.worker_registry import WorkerRegistry
+from beekeeper.user_memory import extract_and_save_queen_memories
+from beekeeper.worker_registry import WorkerRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ def _make_queen(tmp_path: Path) -> QueenAgent:
 
 def _stub_llm(queen: QueenAgent) -> None:
     """Patch LLM router to avoid network calls."""
-    from beehive.worker import WebSearchWorker, WorkerKind
+    from beekeeper.worker import WebSearchWorker, WorkerKind
 
     worker = queen.worker_runtime._workers.get(WorkerKind.web_search)
     if isinstance(worker, WebSearchWorker):
@@ -50,7 +50,7 @@ def _stub_llm(queen: QueenAgent) -> None:
 
 
 def _stub_searxng(queen: QueenAgent) -> None:
-    from beehive.worker import WebSearchWorker, WorkerKind
+    from beekeeper.worker import WebSearchWorker, WorkerKind
 
     worker = queen.worker_runtime._workers.get(WorkerKind.web_search)
     if isinstance(worker, WebSearchWorker):
@@ -122,7 +122,7 @@ def test_action_remember_writes_memory(tmp_path: Path) -> None:
     )
     req = QueenActionRequest(
         action_name="remember",
-        parameters={"content": "Beehive agent framework is modular.", "tags": ["beehive"]},
+        parameters={"content": "Beekeeper agent framework is modular.", "tags": ["beekeeper"]},
     )
     result = _action_remember(req, ctx)
     assert result.success is True
@@ -130,8 +130,8 @@ def test_action_remember_writes_memory(tmp_path: Path) -> None:
 
     memories = store.read_queen_memories()
     assert len(memories) == 1
-    assert memories[0]["content"] == "Beehive agent framework is modular."
-    assert "beehive" in memories[0]["tags"]
+    assert memories[0]["content"] == "Beekeeper agent framework is modular."
+    assert "beekeeper" in memories[0]["tags"]
 
 
 def test_action_remember_requires_content(tmp_path: Path) -> None:
@@ -279,7 +279,7 @@ def test_queen_action_loop_continues_to_workers(tmp_path: Path) -> None:
     result = queen.run(
         intent="research_topic",
         payload={
-            "query": "beehive architecture",
+            "query": "beekeeper architecture",
             "queen_actions": [
                 {"action": "remember", "parameters": {"content": "Pre-task memory."}}
             ],
@@ -304,7 +304,7 @@ def test_extract_and_save_queen_memories_no_llm(tmp_path: Path, monkeypatch) -> 
     """When LLM is unreachable, function should return empty list gracefully."""
     store = _make_store(tmp_path)
 
-    import beehive.user_memory as um
+    import beekeeper.user_memory as um
     monkeypatch.setattr(um, "_make_extractor_llm", lambda: (lambda prompt: None))
 
     saved = extract_and_save_queen_memories("Some observation text.", store)

@@ -1,6 +1,6 @@
 # Prompt Templates
 
-Beehive supports loadable prompt templates so you can customize prompts without editing source code.
+Beekeeper supports loadable prompt templates so you can customize prompts without editing source code.
 
 ## Location
 
@@ -46,7 +46,7 @@ The user memory pipeline will use this instead of the built-in default.
 3. Load in your code:
 
 ```python
-from beehive.prompt_templates import load_prompt_template, render_prompt
+from beekeeper.prompt_templates import load_prompt_template, render_prompt
 
 template = load_prompt_template(Path(".honeycomb"), "my_template")
 text = render_prompt(template, foo="value", bar="other")
@@ -54,4 +54,4 @@ text = render_prompt(template, foo="value", bar="other")
 
 ## Environment
 
-Templates are loaded relative to `BEEHIVE_HONEYCOMB_ROOT` (default `.honeycomb`). The Queen and chat flows use the honeycomb root from their config.
+Templates are loaded relative to `BEEKEEPER_HONEYCOMB_ROOT` (default `.honeycomb`). The Queen and chat flows use the honeycomb root from their config.

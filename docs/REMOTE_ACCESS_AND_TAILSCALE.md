@@ -1,6 +1,6 @@
 # Remote Access and Tailscale
 
-This guide covers options for exposing Beehive services (Queen API, Beekeeper API, Open WebUI) to remote access without opening ports on your firewall.
+This guide covers options for exposing Beekeeper services (Queen API, Beekeeper API, Open WebUI) to remote access without opening ports on your firewall.
 
 ## Options Overview
 
@@ -44,7 +44,7 @@ tailscale status
 
 ### 4. Expose services to Tailscale
 
-Beehive services listen on `0.0.0.0` by default, so they're already reachable on your Tailscale IP.
+Beekeeper services listen on `0.0.0.0` by default, so they're already reachable on your Tailscale IP.
 
 From another Tailscale device:
 - Queen API: `http://<machine>.tail12345.ts.net:8788/v1` (or your host port)
@@ -67,7 +67,7 @@ Then start services with:
 
 ### 6. Docker Compose
 
-If running via `beehive up`, ensure port mappings are correct. Defaults:
+If running via `beekeeper up`, ensure port mappings are correct. Defaults:
 
 - Queen API: `8788:8788`
 - Beekeeper API: `8787:8787`
@@ -110,9 +110,9 @@ brew install cloudflare/cloudflare/cloudflared
 cloudflared tunnel login
 
 # Create and run tunnel
-cloudflared tunnel create beehive
-cloudflared tunnel route dns beehive api.yourdomain.com
-cloudflared tunnel run --url http://localhost:8787 beehive
+cloudflared tunnel create beekeeper
+cloudflared tunnel route dns beekeeper api.yourdomain.com
+cloudflared tunnel run --url http://localhost:8787 beekeeper
 ```
 
 ---

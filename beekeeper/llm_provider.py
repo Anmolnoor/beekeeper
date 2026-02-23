@@ -1,12 +1,14 @@
 """Unified multi-provider LLM API with fallback chain.
 
-Supports Ollama, Gemini, and optionally OpenAI. Configure via BEEHIVE_LLM_PROVIDERS
+Supports Ollama, Gemini, and optionally OpenAI. Configure via BEEKEEPER_LLM_PROVIDERS
 (comma-separated, e.g. "ollama,gemini") for ordered fallback.
 """
 from __future__ import annotations
 
 import json
 import os
+
+from .audit_logger import log_service_call
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
@@ -157,7 +159,7 @@ class GeminiProvider(LLMProvider):
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI API provider (also works with Azure/compatible endpoints via BEEHIVE_OPENAI_BASE_URL)."""
+    """OpenAI API provider (also works with Azure/compatible endpoints via BEEKEEPER_OPENAI_BASE_URL)."""
 
     def __init__(
         self,
@@ -218,11 +220,11 @@ def _resolve_model_for_tier(tier: str, provider: str) -> str | None:
         return None
     key_suffix = f"_{tier.upper()}"
     if provider == "ollama":
-        return os.getenv(f"BEEHIVE_OLLAMA_MODEL{key_suffix}") or os.getenv("BEEHIVE_OLLAMA_MODEL")
+        return os.getenv(f"BEEKEEPER_OLLAMA_MODEL{key_suffix}") or os.getenv("BEEKEEPER_OLLAMA_MODEL")
     if provider == "gemini":
-        return os.getenv(f"BEEHIVE_GEMINI_MODEL{key_suffix}") or os.getenv("BEEHIVE_GEMINI_MODEL")
+        return os.getenv(f"BEEKEEPER_GEMINI_MODEL{key_suffix}") or os.getenv("BEEKEEPER_GEMINI_MODEL")
     if provider == "openai":
-        return os.getenv(f"BEEHIVE_OPENAI_MODEL{key_suffix}") or os.getenv("BEEHIVE_OPENAI_MODEL")
+        return os.getenv(f"BEEKEEPER_OPENAI_MODEL{key_suffix}") or os.getenv("BEEKEEPER_OPENAI_MODEL")
     return None
 
 
@@ -257,16 +259,17 @@ class LLMRouter:
         for p in self.providers:
             resp = p.chat(prompt, system=system, messages=messages, model_override=resolved_model)
             if resp and resp.text:
+                log_service_call(resp.source, "completed", source="queen")
                 return resp.text, resp.source
         return None, "fallback"
 
     @classmethod
     def from_env(cls) -> "LLMRouter":
-        """Build router from BEEHIVE_LLM_PROVIDERS and per-provider env vars."""
-        providers_str = os.getenv("BEEHIVE_LLM_PROVIDERS", "").strip()
+        """Build router from BEEKEEPER_LLM_PROVIDERS and per-provider env vars."""
+        providers_str = os.getenv("BEEKEEPER_LLM_PROVIDERS", "").strip()
         if not providers_str:
             # Legacy: single provider
-            single = (os.getenv("BEEHIVE_LLM_PROVIDER") or "ollama").strip().lower()
+            single = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "ollama").strip().lower()
             providers_str = single
 
         provider_names = [p.strip().lower() for p in providers_str.split(",") if p.strip()]
@@ -278,38 +281,38 @@ class LLMRouter:
             if name == "ollama":
                 providers.append(
                     OllamaProvider(
-                        base_url=os.getenv("BEEHIVE_OLLAMA_BASE_URL", "http://100.99.106.59:11434"),
-                        model=os.getenv("BEEHIVE_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
-                        timeout_seconds=int(os.getenv("BEEHIVE_OLLAMA_TIMEOUT_SECONDS", "120")),
+                        base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
+                        model=os.getenv("BEEKEEPER_OLLAMA_MODEL", "llama3.2"),
+                        timeout_seconds=int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")),
                     )
                 )
             elif name == "gemini":
-                key = (os.getenv("BEEHIVE_GEMINI_API_KEY") or "").strip()
+                key = (os.getenv("BEEKEEPER_GEMINI_API_KEY") or "").strip()
                 if key:
                     providers.append(
                         GeminiProvider(
                             api_key=key,
-                            model=os.getenv("BEEHIVE_GEMINI_MODEL", "gemini-1.5-flash"),
-                            timeout_seconds=int(os.getenv("BEEHIVE_GEMINI_TIMEOUT_SECONDS", "120")),
+                            model=os.getenv("BEEKEEPER_GEMINI_MODEL", "gemini-1.5-flash"),
+                            timeout_seconds=int(os.getenv("BEEKEEPER_GEMINI_TIMEOUT_SECONDS", "120")),
                         )
                     )
             elif name == "openai":
-                key = (os.getenv("BEEHIVE_OPENAI_API_KEY") or "").strip()
+                key = (os.getenv("BEEKEEPER_OPENAI_API_KEY") or "").strip()
                 if key:
                     providers.append(
                         OpenAIProvider(
                             api_key=key,
-                            model=os.getenv("BEEHIVE_OPENAI_MODEL", "gpt-4o-mini"),
-                            base_url=os.getenv("BEEHIVE_OPENAI_BASE_URL") or None,
-                            timeout_seconds=int(os.getenv("BEEHIVE_OPENAI_TIMEOUT_SECONDS", "120")),
+                            model=os.getenv("BEEKEEPER_OPENAI_MODEL", "gpt-4o-mini"),
+                            base_url=os.getenv("BEEKEEPER_OPENAI_BASE_URL") or None,
+                            timeout_seconds=int(os.getenv("BEEKEEPER_OPENAI_TIMEOUT_SECONDS", "120")),
                         )
                     )
         if not providers:
             providers.append(
                 OllamaProvider(
-                    base_url=os.getenv("BEEHIVE_OLLAMA_BASE_URL", "http://100.99.106.59:11434"),
-                    model=os.getenv("BEEHIVE_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
-                    timeout_seconds=int(os.getenv("BEEHIVE_OLLAMA_TIMEOUT_SECONDS", "120")),
+                    base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
+                    model=os.getenv("BEEKEEPER_OLLAMA_MODEL", "llama3.2"),
+                    timeout_seconds=int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")),
                 )
             )
         return cls(providers)
@@ -318,8 +321,8 @@ class LLMRouter:
 def build_llm_router(
     *,
     llm_providers: str | None = None,
-    ollama_base_url: str = "http://100.99.106.59:11434",
-    ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
+    ollama_base_url: str = "http://localhost:11434",
+    ollama_model: str = "llama3.2",
     ollama_timeout_seconds: int = 120,
     gemini_api_key: str = "",
     gemini_model: str = "gemini-1.5-flash",
@@ -333,7 +336,7 @@ def build_llm_router(
     if llm_providers:
         names = [p.strip().lower() for p in llm_providers.split(",") if p.strip()]
     else:
-        single = os.getenv("BEEHIVE_LLM_PROVIDER", "ollama").strip().lower()
+        single = os.getenv("BEEKEEPER_LLM_PROVIDER", "ollama").strip().lower()
         names = [single]
 
     providers: list[LLMProvider] = []

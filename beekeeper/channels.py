@@ -55,10 +55,21 @@ class ChatHub:
             "whatsapp": WhatsAppAdapter(),
         }
 
-    def dispatch(self, channel: str, payload: dict[str, Any], intent: str = "research_topic") -> dict[str, Any]:
+    def dispatch(
+        self,
+        channel: str,
+        payload: dict[str, Any],
+        intent: str = "research_topic",
+        source: str | None = None,
+    ) -> dict[str, Any]:
         adapter = self.adapters.get(channel)
         if adapter is None:
             raise ValueError(f"unsupported_channel={channel}")
         inbound = adapter.format_inbound(payload)
-        run = self.queen.run(intent=intent, payload={"query": inbound.text, **inbound.metadata})
+        run_source = source or f"channel:{channel}"
+        run = self.queen.run(
+            intent=intent,
+            payload={"query": inbound.text, **inbound.metadata},
+            source=run_source,
+        )
         return adapter.format_outbound(run)

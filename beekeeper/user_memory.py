@@ -10,13 +10,13 @@ from .worker import WebSearchWorker
 
 def _make_extractor_llm() -> Callable[[str], str | None]:
     """Build a callable that uses the configured LLM for extraction."""
-    provider = (os.getenv("BEEHIVE_LLM_PROVIDER") or "ollama").strip().lower()
-    base_url = (os.getenv("BEEHIVE_OLLAMA_BASE_URL") or "http://100.99.106.59:11434").rstrip("/")
-    model = os.getenv("BEEHIVE_OLLAMA_MODEL") or "catsarethebest/qwen2.5-N2:1.5b"
-    timeout = max(5, int(os.getenv("BEEHIVE_OLLAMA_TIMEOUT_SECONDS", "120")))
-    gemini_key = (os.getenv("BEEHIVE_GEMINI_API_KEY") or "").strip()
-    gemini_model = os.getenv("BEEHIVE_GEMINI_MODEL") or "gemini-1.5-flash"
-    gemini_timeout = max(5, int(os.getenv("BEEHIVE_GEMINI_TIMEOUT_SECONDS", "120")))
+    provider = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "ollama").strip().lower()
+    base_url = (os.getenv("BEEKEEPER_OLLAMA_BASE_URL") or "http://100.99.106.59:11434").rstrip("/")
+    model = os.getenv("BEEKEEPER_OLLAMA_MODEL") or "catsarethebest/qwen2.5-N2:1.5b"
+    timeout = max(5, int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")))
+    gemini_key = (os.getenv("BEEKEEPER_GEMINI_API_KEY") or "").strip()
+    gemini_model = os.getenv("BEEKEEPER_GEMINI_MODEL") or "gemini-1.5-flash"
+    gemini_timeout = max(5, int(os.getenv("BEEKEEPER_GEMINI_TIMEOUT_SECONDS", "120")))
 
     worker = WebSearchWorker(
         llm_provider=provider,

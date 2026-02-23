@@ -13,7 +13,7 @@ def main() -> None:
         QueenConfig(
             honeycomb_root=root,
             max_reruns=1,
-            ollama_base_url=os.getenv("BEEHIVE_OLLAMA_BASE_URL", "http://100.99.106.59:11434"),
+            ollama_base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://100.99.106.59:11434"),
         )
     )
     scenarios = [

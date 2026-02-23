@@ -11,7 +11,8 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from beehive.queen import QueenAgent, QueenConfig
+from beekeeper.audit_logger import log_service_call
+from beekeeper.queen import QueenAgent, QueenConfig
 
 # Load .env at module load so QueenConfig/LLM get env vars
 def _load_env() -> None:
@@ -28,19 +29,19 @@ def _load_env() -> None:
 
 _load_env()
 
-app = FastAPI(title="Queen API", version="0.1.0", description="OpenAI-compatible adapter for Beehive Queen agent")
+app = FastAPI(title="Queen API", version="0.1.0", description="OpenAI-compatible adapter for Beekeeper Queen agent")
 
-QUEEN_MODEL_ID = "beehive-queen"
+QUEEN_MODEL_ID = "beekeeper-queen"
 
 
 def _get_queen_config() -> QueenConfig:
-    honeycomb_root = Path(os.getenv("BEEHIVE_HONEYCOMB_ROOT", ".honeycomb"))
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
     return QueenConfig(
         honeycomb_root=honeycomb_root,
-        scheduler_backend=os.getenv("BEEHIVE_SCHEDULER_BACKEND", "inline"),
-        vector_backend=os.getenv("BEEHIVE_VECTOR_BACKEND", "qdrant"),
-        vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
-        vector_collection=os.getenv("BEEHIVE_VECTOR_COLLECTION", "honeycomb_memory"),
+        scheduler_backend=os.getenv("BEEKEEPER_SCHEDULER_BACKEND", "inline"),
+        vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
+        vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
+        vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
     )
 
 
@@ -125,21 +126,32 @@ def list_models():
 @app.post("/v1/chat/completions")
 def chat_completions(
     request: ChatCompletionRequest,
-    x_beehive_intent: str | None = Header(None, alias="X-Beehive-Intent"),
-    x_beehive_model: str | None = Header(None, alias="X-Beehive-Model"),
+    x_beekeeper_intent: str | None = Header(None, alias="X-Beekeeper-Intent"),
+    x_beekeeper_model: str | None = Header(None, alias="X-Beekeeper-Model"),
+    x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id"),
 ):
-    """OpenAI-compatible chat completions. Forwards to Queen agent. X-Beehive-Model overrides LLM model."""
-    intent = x_beehive_intent or "research_topic"
-    model_override = (x_beehive_model or "").strip() or None
+    """OpenAI-compatible chat completions. Forwards to Queen agent. X-Beekeeper-Model overrides LLM model. X-Beekeeper-User-Id enables user memory."""
+    intent = x_beekeeper_intent or "research_topic"
+    model_override = (x_beekeeper_model or "").strip() or None
     if model_override is None:
         try:
-            from beehive.store import BeekeeperStore
+            from beekeeper.store import BeekeeperStore
             store = BeekeeperStore(root=Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")))
-            honeycomb_root = os.getenv("BEEHIVE_HONEYCOMB_ROOT", ".honeycomb")
+            honeycomb_root = os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb")
             model_override = store.resolve_llm_model(honeycomb_root=honeycomb_root)
         except Exception:
             pass
     query, prior = _parse_messages(request.messages or [])
+
+    user_id = (x_beekeeper_user_id or "").strip() or None
+    user_memories: list[dict] = []
+    if user_id:
+        try:
+            from beekeeper.store import BeekeeperStore
+            store = BeekeeperStore(root=Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")))
+            user_memories = [{"content": m["content"]} for m in store.list_user_memories(user_id)]
+        except Exception:
+            pass
 
     empty_reply = "Please provide a message to process."
     if not query.strip():
@@ -162,11 +174,28 @@ def chat_completions(
         payload["messages"] = prior
     if model_override:
         payload["model_override"] = model_override
+    if user_memories:
+        payload["user_memories"] = user_memories
 
+    log_service_call("queen_api", "called", source="queen_api")
     config = _get_queen_config()
     queen = QueenAgent(config)
-    result = queen.run(intent=intent, payload=payload)
+    result = queen.run(intent=intent, payload=payload, source="queen_api")
+    log_service_call("queen", "completed", source="queen_api", trace_id=result.get("trace_id"))
     reply = _extract_reply(result)
+
+    # Extract and save user memories after reply (when user_id provided)
+    if user_id and query and reply:
+        try:
+            from beekeeper.user_memory import extract_memories
+            from beekeeper.store import BeekeeperStore
+            honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
+            store = BeekeeperStore(root=Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")))
+            chat_id = result.get("trace_id")
+            for mem in extract_memories(query, reply, honeycomb_root=honeycomb_root):
+                store.append_user_memory(user_id, mem, chat_id=chat_id)
+        except Exception:
+            pass
 
     if request.stream:
         return _stream_reply(reply)
@@ -242,9 +271,11 @@ def run_actions(request: ActionsRequest):
         "queen_actions": request.actions,
         "stop_after_actions": request.stop_after_actions,
     }
+    log_service_call("queen_api", "called", source="queen_api:actions")
     config = _get_queen_config()
     queen = QueenAgent(config)
-    result = queen.run(intent=request.intent, payload=payload)
+    result = queen.run(intent=request.intent, payload=payload, source="queen_api")
+    log_service_call("queen", "completed", source="queen_api", trace_id=result.get("trace_id"))
     return {
         "ok": True,
         "trace_id": result.get("trace_id"),
@@ -268,9 +299,9 @@ class SpawnWorkerRequest(BaseModel):
 @app.post("/v1/workers")
 def spawn_worker(request: SpawnWorkerRequest):
     """Dynamically register a new custom worker blueprint in the Queen's registry."""
-    from beehive.worker_registry import WorkerRegistry
+    from beekeeper.worker_registry import WorkerRegistry
 
-    honeycomb_root = Path(os.getenv("BEEHIVE_HONEYCOMB_ROOT", ".honeycomb"))
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
     registry = WorkerRegistry(honeycomb_root)
     registry.ensure_registry_file()
 
@@ -295,15 +326,15 @@ def spawn_worker(request: SpawnWorkerRequest):
 @app.get("/v1/memories")
 def list_memories(limit: int = 50, tag: str | None = None):
     """List the Queen's persisted memories, most recent first."""
-    from beehive.honeycomb import HoneycombConfig, HoneycombStore
+    from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
 
-    honeycomb_root = Path(os.getenv("BEEHIVE_HONEYCOMB_ROOT", ".honeycomb"))
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
     store = HoneycombStore(
         HoneycombConfig(
             root_dir=honeycomb_root,
-            vector_backend=os.getenv("BEEHIVE_VECTOR_BACKEND", "memory"),
-            vector_collection=os.getenv("BEEHIVE_VECTOR_COLLECTION", "honeycomb_memory"),
-            vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
+            vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
+            vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+            vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
         )
     )
     memories = store.read_queen_memories(limit=limit, tag=tag)
@@ -319,15 +350,15 @@ class MemoryWriteRequest(BaseModel):
 @app.post("/v1/memories")
 def write_memory(request: MemoryWriteRequest):
     """Manually add a memory entry to the Queen's memory store."""
-    from beehive.honeycomb import HoneycombConfig, HoneycombStore
+    from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
 
-    honeycomb_root = Path(os.getenv("BEEHIVE_HONEYCOMB_ROOT", ".honeycomb"))
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
     store = HoneycombStore(
         HoneycombConfig(
             root_dir=honeycomb_root,
-            vector_backend=os.getenv("BEEHIVE_VECTOR_BACKEND", "memory"),
-            vector_collection=os.getenv("BEEHIVE_VECTOR_COLLECTION", "honeycomb_memory"),
-            vector_url=os.getenv("BEEHIVE_VECTOR_URL", "http://localhost:6333"),
+            vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
+            vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+            vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
         )
     )
     memory_id = store.write_queen_memory(
