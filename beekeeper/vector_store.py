@@ -93,7 +93,13 @@ class QdrantVectorStore:
         if not self._ready:
             self._fallback.upsert(item_id, text)
             return
-        log_service_call("qdrant", "called", source="queen", extra={"op": "upsert"})
+        log_service_call(
+            "qdrant",
+            "called",
+            source="queen",
+            resource="qdrant:upsert",
+            extra={"op": "upsert"},
+        )
         point_id = uuid.uuid5(uuid.NAMESPACE_DNS, item_id)
         point = self._qdrant_models.PointStruct(
             id=point_id,
@@ -105,7 +111,13 @@ class QdrantVectorStore:
     def search(self, query: str, limit: int = 5) -> list[str]:
         if not self._ready:
             return self._fallback.search(query, limit=limit)
-        log_service_call("qdrant", "called", source="queen", extra={"op": "search"})
+        log_service_call(
+            "qdrant",
+            "called",
+            source="queen",
+            resource="qdrant:search",
+            extra={"op": "search"},
+        )
         embedding = _hash_embedding(query, dim=self.dim)
         response = self._client.query_points(
             collection_name=self.collection, query=embedding, limit=limit
@@ -116,7 +128,13 @@ class QdrantVectorStore:
     def search_with_content(self, query: str, limit: int = 5) -> list[tuple[str, str]]:
         if not self._ready:
             return self._fallback.search_with_content(query, limit=limit)
-        log_service_call("qdrant", "called", source="queen", extra={"op": "search_with_content"})
+        log_service_call(
+            "qdrant",
+            "called",
+            source="queen",
+            resource="qdrant:search_with_content",
+            extra={"op": "search_with_content"},
+        )
         embedding = _hash_embedding(query, dim=self.dim)
         response = self._client.query_points(
             collection_name=self.collection, query=embedding, limit=limit
