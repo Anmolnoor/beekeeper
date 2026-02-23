@@ -26,6 +26,10 @@ All environment variables used by the platform. Set them in `.env` (loaded autom
 | `BEEKEEPER_LLM_PROVIDERS` | _(not set)_ | Comma-separated ordered list: `ollama,gemini,openai` |
 | `BEEKEEPER_LLM_PROVIDER` | `ollama` | Legacy single-provider setting (overridden by `BEEKEEPER_LLM_PROVIDERS`) |
 
+> In `docker-compose.yml`, several services set
+> `BEEKEEPER_LLM_PROVIDERS=${BEEKEEPER_LLM_PROVIDERS:-gemini,ollama}`, so the
+> compose default order is Gemini first, then Ollama.
+
 ### Ollama
 
 | Variable | Default | Description |
@@ -65,6 +69,9 @@ All environment variables used by the platform. Set them in `.env` (loaded autom
 |----------|---------|-------------|
 | `BEEKEEPER_CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker URL |
 | `BEEKEEPER_CELERY_BACKEND_URL` | `redis://localhost:6379/1` | Redis result backend URL |
+
+> In Docker Compose services, use container DNS names (for example
+> `redis://redis:6379/0`) instead of `localhost`.
 
 ---
 

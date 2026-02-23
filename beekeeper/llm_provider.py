@@ -10,6 +10,7 @@ import os
 
 from .audit_logger import log_service_call
 import urllib.parse
+import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -116,7 +117,7 @@ class GeminiProvider(LLMProvider):
             return None
         model = model_override or self.model
         model_enc = urllib.parse.quote(model, safe=":")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_enc}:generateContent?key={self.api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_enc}:generateContent"
         contents: list[dict[str, Any]] = []
         if system or messages:
             text_parts: list[str] = []
@@ -137,7 +138,10 @@ class GeminiProvider(LLMProvider):
         req = urllib.request.Request(
             url=url,
             method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "X-goog-api-key": self.api_key,
+            },
             data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
         )
         try:
@@ -153,6 +157,13 @@ class GeminiProvider(LLMProvider):
                     ).strip()
                     if text:
                         return LLMResponse(text=text, source="gemini", model=model)
+        except urllib.error.HTTPError as exc:
+            log_service_call(
+                "gemini",
+                "failed",
+                source="queen",
+                extra={"status_code": exc.code, "model": model},
+            )
         except Exception:
             pass
         return None

@@ -896,7 +896,7 @@ class QueenAgent:
                         if self.config.llm_provider == "gemini":
                             assistant_reply = (
                                 "I could not reach Gemini right now. "
-                                "Set BEEKEEPER_GEMINI_API_KEY and ensure API access."
+                                "Check BEEKEEPER_GEMINI_API_KEY, billing/quota, and API access."
                             )
                         else:
                             assistant_reply = (
@@ -908,7 +908,7 @@ class QueenAgent:
                         "evidence": [],
                         "assistant_reply": assistant_reply,
                         "response_source": source,
-                        "synthesis": "Direct chat (Queen → Ollama, no workers).",
+                        "synthesis": "Direct chat (Queen direct, no workers).",
                     }
                     result = ResultEnvelope(
                         task_id=str(uuid4()),

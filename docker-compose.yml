@@ -41,6 +41,8 @@ services:
     environment:
       BASE_URL: http://localhost:8080/
       INSTANCE_NAME: beekeeper-searxng
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml
     healthcheck:
       test: ["CMD", "wget", "-qO", "-", "http://localhost:8080/"]
       interval: 10s
@@ -60,7 +62,10 @@ services:
       BEEKEEPER_VECTOR_BACKEND: qdrant
       BEEKEEPER_VECTOR_COLLECTION: honeycomb_memory
       BEEKEEPER_VECTOR_URL: http://qdrant:6333
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-gemini,ollama}
       BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-ollama}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
       BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
@@ -91,7 +96,10 @@ services:
       BEEKEEPER_VECTOR_BACKEND: qdrant
       BEEKEEPER_VECTOR_COLLECTION: honeycomb_memory
       BEEKEEPER_VECTOR_URL: http://qdrant:6333
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-gemini,ollama}
       BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-ollama}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
       BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
@@ -116,7 +124,10 @@ services:
     command: ["python", "-m", "beekeeper.runner", "pulse", "--interval", "2", "--honeycomb-root", "/app/runtime/honeycomb"]
     environment:
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-gemini,ollama}
       BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-ollama}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
       BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
@@ -139,6 +150,8 @@ services:
     environment:
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
       BEEKEEPER_SCHEDULER_BACKEND: inline
+      BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
+      BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
       BEEKEEPER_VECTOR_BACKEND: qdrant
       BEEKEEPER_VECTOR_URL: http://qdrant:6333
       BEEKEEPER_VECTOR_COLLECTION: honeycomb_memory
@@ -173,10 +186,15 @@ services:
       BEEKEEPER_PORT: "8787"
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
       BEEKEEPER_STORE_ROOT: /app/runtime/store
+      BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
+      BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
       BEEKEEPER_VECTOR_BACKEND: qdrant
       BEEKEEPER_VECTOR_URL: http://qdrant:6333
       BEEKEEPER_VECTOR_COLLECTION: honeycomb_memory
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-gemini,ollama}
       BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-ollama}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
       BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}

@@ -30,6 +30,12 @@ beekeeper up --with-open-webui  # + Open WebUI
 | `queen-api` | local build | `8788` (host) | OpenAI-compatible Queen API |
 | `open-webui` | `ghcr.io/open-webui/open-webui` | `3000` | Chat UI for users |
 
+SearXNG is configured via a host-mounted settings file:
+
+```bash
+./searxng/settings.yml -> /etc/searxng/settings.yml
+```
+
 ### Shared Volume: `honeycomb_data`
 
 All workers, Pulse, and the Queen API share a Docker volume mounted at `/app/runtime/honeycomb` so all services read/write the same Honeycomb data.
@@ -75,7 +81,8 @@ QueenAgent → TemporalBeekeeperClient → Temporal Server → Temporal Worker �
 Providers are tried in order. First success wins.
 
 ```
-BEEKEEPER_LLM_PROVIDERS=ollama,gemini  →  tries Ollama first, Gemini as fallback
+BEEKEEPER_LLM_PROVIDERS=gemini,ollama  →  (compose default) tries Gemini first, then Ollama fallback
+BEEKEEPER_LLM_PROVIDERS=ollama,gemini  →  Ollama first, Gemini fallback
 BEEKEEPER_LLM_PROVIDER=ollama          →  single provider (legacy)
 ```
 

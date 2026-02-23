@@ -165,20 +165,22 @@ class WebSearchWorker(BaseSpecialistWorker):
             if assistant_reply is None:
                 assistant_reply = (
                     "I could not reach any configured LLM. "
-                    "Ensure Ollama is running (BEEKEEPER_OLLAMA_BASE_URL) and/or BEEKEEPER_GEMINI_API_KEY is set."
+                    "Check Ollama connectivity, BEEKEEPER_GEMINI_API_KEY, and Gemini billing/quota."
                 )
             return WebSearchOutput(
                 query=query,
                 evidence=[],
                 assistant_reply=assistant_reply,
                 response_source=source,
-                synthesis="Direct chat (Ollama only, no web search).",
+                synthesis="Direct chat (LLM only, no web search).",
             ).model_dump(mode="json")
-        domains = list(task.payload.get("domains", [])) or context.rule.allowed_domains or [
-            "docs.python.org",
-            "github.com",
-            "openai.com",
-        ]
+        _payload_domains = task.payload.get("domains")
+        if _payload_domains is not None:
+            domains = list(_payload_domains)
+        elif context.rule.allowed_domains:
+            domains = list(context.rule.allowed_domains)
+        else:
+            domains = []
         allowed_domains = {str(domain).lower() for domain in domains}
         evidence: list[WebEvidence] = []
         search_error: str | None = None
@@ -239,7 +241,7 @@ class WebSearchWorker(BaseSpecialistWorker):
         if assistant_reply is None:
             assistant_reply = (
                 f"I could not reach any configured LLM, but I prepared an evidence-backed synthesis for '{query}'. "
-                "Ensure Ollama is running (BEEKEEPER_OLLAMA_BASE_URL) and/or BEEKEEPER_GEMINI_API_KEY is set."
+                "Check Ollama connectivity, BEEKEEPER_GEMINI_API_KEY, and Gemini billing/quota."
             )
         return WebSearchOutput(
             query=query,

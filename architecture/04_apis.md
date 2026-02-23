@@ -64,6 +64,11 @@ Protected endpoints require `Authorization: Bearer <jwt>`.
 | `PATCH` | `/chats/{chat_id}` | Update chat (title, pinned) |
 | `DELETE` | `/chats/{chat_id}` | Delete chat |
 
+`POST /chats/{chat_id}/messages` enriches the Queen payload with prior chat
+history and user memories, and currently sets:
+- `delegate_to_worker=true`
+- `use_web_search=true`
+
 ### Channel Webhooks
 
 | Method | Path | Description |
@@ -131,6 +136,8 @@ Standard OpenAI `ChatCompletionRequest` format:
 |--------|-------------|
 | `X-Beekeeper-Intent` | Override the Queen intent (default: `research_topic`) |
 | `X-Beekeeper-Model` | Override LLM model for this request |
+| `X-Beekeeper-Delegate-Worker` | Override worker delegation (`true`/`false`, default: `true`) |
+| `X-Beekeeper-Use-Web-Search` | Override web search usage (`true`/`false`, default: `true`) |
 
 ### Message Parsing
 The Queen API extracts the last user message as `query` and passes prior messages as conversation history context to the Queen agent.

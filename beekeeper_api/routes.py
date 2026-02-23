@@ -1148,7 +1148,7 @@ def send_chat_message(
     prior = [{"role": m["role"], "content": m["content"]} for m in chat.get("messages", [])]
     store.append_chat_message(chat_id, "user", content)
     memories = [{"content": m["content"]} for m in store.list_user_memories(user.user_id)]
-    payload = {"query": content, "messages": prior, "user_memories": memories}
+    payload = {"query": content, "messages": prior, "user_memories": memories, "delegate_to_worker": True, "use_web_search": True}
     log_service_call("beekeeper_api", "called", source="web_ui")
     queen = QueenAgent(
         QueenConfig(
