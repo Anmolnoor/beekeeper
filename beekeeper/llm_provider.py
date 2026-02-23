@@ -162,6 +162,8 @@ class GeminiProvider(LLMProvider):
                 "gemini",
                 "failed",
                 source="queen",
+                resource="gemini:chat",
+                error=f"HTTPError {exc.code}",
                 extra={"status_code": exc.code, "model": model},
             )
         except Exception:
@@ -270,7 +272,13 @@ class LLMRouter:
         for p in self.providers:
             resp = p.chat(prompt, system=system, messages=messages, model_override=resolved_model)
             if resp and resp.text:
-                log_service_call(resp.source, "completed", source="queen")
+                log_service_call(
+                    resp.source,
+                    "completed",
+                    source="queen",
+                    resource=f"{resp.source}:chat",
+                    extra={"model": resp.model} if resp.model else None,
+                )
                 return resp.text, resp.source
         return None, "fallback"
 

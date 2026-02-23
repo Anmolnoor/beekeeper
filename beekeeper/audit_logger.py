@@ -34,6 +34,11 @@ def log_service_call(
     source: str | None = None,
     trace_id: str | None = None,
     extra: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    resource: str | None = None,
+    outcome: str | None = None,
+    error: str | None = None,
+    duration_ms: int | None = None,
 ) -> None:
     """Append a service call entry to the audit log.
 
@@ -49,8 +54,24 @@ def log_service_call(
         "action": action,
         "source": source or "unknown",
     }
+    normalized_outcome = outcome
+    if not normalized_outcome:
+        if action == "failed":
+            normalized_outcome = "failure"
+        elif action in {"completed", "submitted"}:
+            normalized_outcome = "success"
+    if normalized_outcome:
+        row["outcome"] = normalized_outcome
     if trace_id:
         row["trace_id"] = trace_id
+    if user_id:
+        row["user_id"] = user_id
+    if resource:
+        row["resource"] = resource
+    if error:
+        row["error"] = error
+    if duration_ms is not None:
+        row["duration_ms"] = duration_ms
     if extra:
         row["extra"] = extra
 
