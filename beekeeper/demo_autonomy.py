@@ -1,7 +1,7 @@
 """demo_autonomy.py — Demonstrates the full Queen autonomy loop.
 
 Run with:
-    python -m beehive.demo_autonomy
+    python -m beekeeper.demo_autonomy
 
 No live LLM required — all LLM calls are stubbed so this runs in CI / offline.
 
@@ -27,7 +27,7 @@ _STUB_REPLY = "The agent processed your request successfully. Key finding: auton
 
 def _patch_llm(worker_runtime: Any) -> None:
     """Monkeypatch the WebSearchWorker's LLM reply to avoid live network calls."""
-    from beehive.worker import WebSearchWorker, WorkerKind
+    from beekeeper.worker import WebSearchWorker, WorkerKind
 
     worker = worker_runtime._workers.get(WorkerKind.web_search)
     if isinstance(worker, WebSearchWorker):
@@ -37,7 +37,7 @@ def _patch_llm(worker_runtime: Any) -> None:
 
 def _patch_searxng(worker_runtime: Any) -> None:
     """Monkeypatch SearXNG so no HTTP call is made."""
-    from beehive.worker import WebSearchWorker, WorkerKind
+    from beekeeper.worker import WebSearchWorker, WorkerKind
 
     worker = worker_runtime._workers.get(WorkerKind.web_search)
     if isinstance(worker, WebSearchWorker):
@@ -49,7 +49,7 @@ def _patch_searxng(worker_runtime: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def run_demo(honeycomb_root: Path) -> None:
-    from beehive.queen import QueenAgent, QueenConfig
+    from beekeeper.queen import QueenAgent, QueenConfig
 
     print("\n" + "═" * 60)
     print("  🐝  Queen Autonomy Demo")
@@ -184,7 +184,7 @@ def run_demo(honeycomb_root: Path) -> None:
 
 def main() -> None:
     import tempfile
-    with tempfile.TemporaryDirectory(prefix="beehive_demo_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="beekeeper_demo_") as tmpdir:
         run_demo(Path(tmpdir) / "honeycomb")
 
 

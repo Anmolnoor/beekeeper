@@ -1,6 +1,6 @@
-# Beehive Package Ecosystem
+# Beekeeper Package Ecosystem
 
-`beehive install <package>` installs worker and guardrail packages from PyPI and registers them in your honeycomb.
+`beekeeper install <package>` installs worker and guardrail packages from PyPI and registers them in your honeycomb.
 
 ## Creating an Installable Package
 
@@ -9,18 +9,18 @@
 In your package's `pyproject.toml`:
 
 ```toml
-[project.entry-points."beehive.workers"]
+[project.entry-points."beekeeper.workers"]
 my_worker = "my_package.workers:MyWorker"
 
-[project.entry-points."beehive.guardrails"]
+[project.entry-points."beekeeper.guardrails"]
 my_guardrail = "my_package.guardrails:MyGuardrail"
 ```
 
-Your worker must subclass `beehive.worker.BaseSpecialistWorker` and set `worker_kind` and `output_model`.
+Your worker must subclass `beekeeper.worker.BaseSpecialistWorker` and set `worker_kind` and `output_model`.
 
-### 2. beehive.json
+### 2. beekeeper.json
 
-Include a `beehive.json` file in your package:
+Include a `beekeeper.json` file in your package:
 
 ```json
 {
@@ -42,10 +42,10 @@ Include a `beehive.json` file in your package:
 }
 ```
 
-### 3. [tool.beehive] in pyproject.toml (Python 3.11+)
+### 3. [tool.beekeeper] in pyproject.toml (Python 3.11+)
 
 ```toml
-[tool.beehive]
+[tool.beekeeper]
 workers = [
   { module_path = "my_package.workers", class_name = "MyWorker", worker_kind = "custom" }
 ]
@@ -56,10 +56,10 @@ guardrails = [
 
 ## CLI Commands
 
-- `beehive install <package>` — Install and register
-- `beehive install --list` — List installed plugins
-- `beehive install --no-registry` — Install without adding to worker registry
-- `beehive install -e ./local-path` — Install from local path (editable)
+- `beekeeper install <package>` — Install and register
+- `beekeeper install --list` — List installed plugins
+- `beekeeper install --no-registry` — Install without adding to worker registry
+- `beekeeper install -e ./local-path` — Install from local path (editable)
 
 ## Registry
 

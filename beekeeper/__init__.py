@@ -1,4 +1,4 @@
-"""Beehive agent platform package."""
+"""Beekeeper agent platform package."""
 
 from .contracts import (
     AbilitiesProfile,
@@ -17,8 +17,8 @@ from .contracts import (
 )
 from .queen import QueenAgent
 from .scheduler import CeleryScheduler, InlineScheduler
-from .sdk import BeehiveClient, create_client
-from .temporal_integration import TemporalBeehiveClient, TemporalConfig
+from .sdk import BeekeeperClient, create_client
+from .temporal_integration import TemporalBeekeeperClient, TemporalConfig
 
 __all__ = [
     "AgentIdentity",
@@ -38,7 +38,7 @@ __all__ = [
     "InlineScheduler",
     "CeleryScheduler",
     "TemporalConfig",
-    "TemporalBeehiveClient",
-    "BeehiveClient",
+    "TemporalBeekeeperClient",
+    "BeekeeperClient",
     "create_client",
 ]

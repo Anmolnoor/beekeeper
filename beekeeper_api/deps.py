@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from beehive.honeycomb import HoneycombConfig, HoneycombStore
-from beehive.store import BeekeeperStore
-from beehive.worker_registry import WorkerRegistry
+from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+from beekeeper.store import BeekeeperStore
+from beekeeper.worker_registry import WorkerRegistry
 
 
 def get_store() -> BeekeeperStore:

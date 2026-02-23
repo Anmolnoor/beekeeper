@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
+from .audit_logger import log_service_call
 from .contracts import RetryCategory
 
 class Scheduler(Protocol):
@@ -97,14 +98,16 @@ class InlineScheduler:
 class CeleryScheduler:
     broker_url: str = "redis://localhost:6379/0"
     backend_url: str = "redis://localhost:6379/1"
-    task_name: str = "beehive.execute_worker_task"
+    task_name: str = "beekeeper.execute_worker_task"
 
     def __post_init__(self) -> None:
         from celery import Celery
 
-        self._app = Celery("beehive_scheduler", broker=self.broker_url, backend=self.backend_url)
+        self._app = Celery("beekeeper_scheduler", broker=self.broker_url, backend=self.backend_url)
 
     def submit(self, task_payload: dict[str, Any], context_payload: dict[str, Any]) -> str:
+        trace_id = task_payload.get("queen_trace_id") if isinstance(task_payload, dict) else None
+        log_service_call("redis", "submitted", source="queen", trace_id=trace_id)
         async_result = self._app.send_task(self.task_name, args=[task_payload, context_payload])
         return str(async_result.id)
 

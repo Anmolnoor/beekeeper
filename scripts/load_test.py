@@ -6,7 +6,7 @@ import statistics
 import time
 from pathlib import Path
 
-from beehive.queen import QueenAgent, QueenConfig
+from beekeeper.queen import QueenAgent, QueenConfig
 
 
 def main() -> None:

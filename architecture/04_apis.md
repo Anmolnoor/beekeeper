@@ -110,7 +110,7 @@ Protected endpoints require `Authorization: Bearer <jwt>`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/models` | Returns `beehive-queen` model listing |
+| `GET` | `/v1/models` | Returns `beekeeper-queen` model listing |
 | `POST` | `/v1/chat/completions` | Chat completions — forwards to `QueenAgent.run()` |
 | `GET` | `/health` | Health check: `{"status": "ok", "service": "queen-api"}` |
 
@@ -119,7 +119,7 @@ Protected endpoints require `Authorization: Bearer <jwt>`.
 Standard OpenAI `ChatCompletionRequest` format:
 ```json
 {
-  "model": "beehive-queen",
+  "model": "beekeeper-queen",
   "messages": [{"role": "user", "content": "what is agent reliability?"}],
   "stream": false
 }
@@ -129,16 +129,16 @@ Standard OpenAI `ChatCompletionRequest` format:
 
 | Header | Description |
 |--------|-------------|
-| `X-Beehive-Intent` | Override the Queen intent (default: `research_topic`) |
-| `X-Beehive-Model` | Override LLM model for this request |
+| `X-Beekeeper-Intent` | Override the Queen intent (default: `research_topic`) |
+| `X-Beekeeper-Model` | Override LLM model for this request |
 
 ### Message Parsing
 The Queen API extracts the last user message as `query` and passes prior messages as conversation history context to the Queen agent.
 
 ### Configuration (via env vars)
-- `BEEHIVE_HONEYCOMB_ROOT` — data directory
-- `BEEHIVE_SCHEDULER_BACKEND` — scheduler to use (default: `inline`)
-- `BEEHIVE_VECTOR_BACKEND` / `BEEHIVE_VECTOR_URL` — vector store
+- `BEEKEEPER_HONEYCOMB_ROOT` — data directory
+- `BEEKEEPER_SCHEDULER_BACKEND` — scheduler to use (default: `inline`)
+- `BEEKEEPER_VECTOR_BACKEND` / `BEEKEEPER_VECTOR_URL` — vector store
 
 ---
 

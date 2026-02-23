@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from beehive.trace_compaction import (
+from beekeeper.trace_compaction import (
     _compact_events,
     compact_trace_file,
     compact_traces,

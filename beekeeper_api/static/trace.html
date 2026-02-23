@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trace - Beekeeper</title>
+  <style>
+    :root { --bg: #0f0f12; --card: #1a1a1f; --border: #2a2a32; --text: #e8e8ed; --muted: #888; --accent: #7c6ef6; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1.5rem; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .back { font-size: 0.875rem; color: var(--muted); margin-bottom: 0.5rem; display: inline-block; }
+    .back:hover { color: var(--text); }
+    .event { padding: 0.5rem 0; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+    .event:last-child { border-bottom: none; }
+    .event-kind { font-weight: 600; color: var(--accent); }
+    .event-at { color: var(--muted); font-size: 0.75rem; }
+    pre { background: var(--bg); padding: 0.5rem; border-radius: 4px; overflow-x: auto; font-size: 0.75rem; margin-top: 0.25rem; }
+  </style>
+</head>
+<body>
+  <a href="/audit" class="back">← Audit Log</a>
+  <div class="card">
+    <h1 id="trace-title">Trace</h1>
+    <p id="trace-id" style="font-size:0.75rem;color:var(--muted)"></p>
+    <div id="trace-events" style="margin-top:1rem">Loading…</div>
+  </div>
+  <script>
+    const API = (() => {
+      const params = new URLSearchParams(window.location.search);
+      const fromUrl = params.get('api') || params.get('api_base');
+      if (fromUrl) return fromUrl.replace(/\/$/, '');
+      if (typeof window !== 'undefined' && window.BEEKEEPER_API_URL) return window.BEEKEEPER_API_URL.replace(/\/$/, '');
+      return '';
+    })();
+    const traceId = window.location.pathname.split('/trace/')[1] || '';
+    function token() { return localStorage.getItem('beekeeper_token'); }
+    function api(url, opts = {}) {
+      const h = { ...opts.headers };
+      if (token()) h['Authorization'] = 'Bearer ' + token();
+      return fetch(API + url, { ...opts, headers: h });
+    }
+    document.getElementById('trace-id').textContent = traceId;
+    document.getElementById('trace-title').textContent = 'Trace: ' + (traceId ? traceId.slice(0, 20) + '…' : '-');
+    async function loadTrace() {
+      const el = document.getElementById('trace-events');
+      if (!traceId) { el.innerHTML = '<p style="color:var(--muted)">No trace ID</p>'; return; }
+      try {
+        const r = await api('/api/traces/' + traceId);
+        if (r.status === 401) { el.innerHTML = '<p>Please <a href="/dashboard">sign in</a>.</p>'; return; }
+        if (!r.ok) throw new Error('Failed to load');
+        const data = await r.json();
+        const events = data.events || [];
+        if (events.length === 0) {
+          el.innerHTML = '<p style="color:var(--muted)">No events</p>';
+        } else {
+          el.innerHTML = events.map(ev => {
+            const kind = ev.kind || ev.event_id ? 'event' : 'unknown';
+            const at = ev.at || '-';
+            const payload = JSON.stringify(ev, null, 2);
+            return '<div class="event"><span class="event-kind">' + kind + '</span> <span class="event-at">' + at + '</span><pre>' + payload.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre></div>';
+          }).join('');
+        }
+      } catch (e) {
+        el.innerHTML = '<p style="color:#f87171">' + (e.message || 'Error') + '</p>';
+      }
+    }
+    loadTrace();
+  </script>
+</body>
+</html>

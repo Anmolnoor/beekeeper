@@ -8,12 +8,12 @@ Use this guide to choose the right configuration for your use case.
 
 | Scheduler | When to Use | Requirements | Command |
 |-----------|-------------|--------------|---------|
-| **inline** | Local dev, quick tests, single-process runs | None | `beehive run --scheduler inline` |
-| **celery** | Production queue: Redis-backed, horizontal scaling | Redis, Celery worker | `beehive run --scheduler celery` |
-| **temporal** | Durable workflows, retries, long-running tasks | Temporal server, Temporal worker | `beehive run --scheduler temporal` |
+| **inline** | Local dev, quick tests, single-process runs | None | `beekeeper run --scheduler inline` |
+| **celery** | Production queue: Redis-backed, horizontal scaling | Redis, Celery worker | `beekeeper run --scheduler celery` |
+| **temporal** | Durable workflows, retries, long-running tasks | Temporal server, Temporal worker | `beekeeper run --scheduler temporal` |
 
 **Quick choice:**
-- **Just trying Beehive?** → `inline`
+- **Just trying Beekeeper?** → `inline`
 - **Team/production with multiple workers?** → `celery`
 - **Need durable execution and retries?** → `temporal`
 
@@ -30,7 +30,7 @@ The Queen routes requests to workers based on intent, payload, and query. Built-
 | **audit** | Review/validate another worker's output | `audit_result` | `{"target_task_id": "...", "target_result": {...}}` |
 
 **Adding custom workers:**
-- **Plugin package:** `beehive install <package>` — see [EXTENSION_POINTS.md](EXTENSION_POINTS.md)
+- **Plugin package:** `beekeeper install <package>` — see [EXTENSION_POINTS.md](EXTENSION_POINTS.md)
 - **Core code:** See [BUILDING_NEW_WORKERS.md](BUILDING_NEW_WORKERS.md)
 
 ---
@@ -39,11 +39,11 @@ The Queen routes requests to workers based on intent, payload, and query. Built-
 
 | Channel | Use When | Setup |
 |---------|----------|-------|
-| **Terminal** | Local dev, scripts, CLI | `beehive chat` or `beehive run --query "..."` |
-| **Open WebUI** | Web chat UI, team access | `beehive up --with-open-webui` → http://localhost:3000 |
-| **Slack** | Team chat, ops alerts | `beehive channels set slack '{"slack_bot_token":"...","slack_signing_secret":"..."}'` |
-| **Telegram** | DMs, group bots | `beehive channels set telegram '{"telegram_bot_token":"..."}'` |
-| **Discord** | Community, gaming | `beehive channels set discord '{"discord_bot_token":"...","discord_public_key":"..."}'` |
+| **Terminal** | Local dev, scripts, CLI | `beekeeper chat` or `beekeeper run --query "..."` |
+| **Open WebUI** | Web chat UI, team access | `beekeeper up --with-open-webui` → http://localhost:3000 |
+| **Slack** | Team chat, ops alerts | `beekeeper channels set slack '{"slack_bot_token":"...","slack_signing_secret":"..."}'` |
+| **Telegram** | DMs, group bots | `beekeeper channels set telegram '{"telegram_bot_token":"..."}'` |
+| **Discord** | Community, gaming | `beekeeper channels set discord '{"discord_bot_token":"...","discord_public_key":"..."}'` |
 | **WhatsApp** | Business messaging | Configure WhatsApp Cloud API vars in `.env` |
 
 **Quick choice:**

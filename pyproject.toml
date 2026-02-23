@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "beehive-agent-platform"
+name = "beekeeper-agent-platform"
 version = "0.1.0"
-description = "Beehive-style multi-agent runtime with queen orchestration and ephemeral workers."
+description = "Beekeeper-style multi-agent runtime with queen orchestration and ephemeral workers."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [project.scripts]
-beehive = "beehive.runner:main"
+beekeeper = "beekeeper.runner:main"
 beekeeper-api = "beekeeper_api.app:main"
 queen-api = "queen_api.app:main"
 
@@ -38,7 +38,7 @@ filterwarnings = [
 ]
 
 [tool.setuptools]
-packages = ["beehive", "beekeeper_api", "queen_api"]
+packages = ["beekeeper", "beekeeper_api", "queen_api"]
 
 [tool.setuptools.package-data]
-beehive = ["souls/*.json", "souls/*.md"]
+beekeeper = ["souls/*.json", "souls/*.md"]

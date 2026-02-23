@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from beehive.queen import QueenAgent, QueenConfig
-from beehive.vector_store import build_vector_store
+from beekeeper.queen import QueenAgent, QueenConfig
+from beekeeper.vector_store import build_vector_store
 
 
 def test_queen_run_creates_results(tmp_path: Path) -> None:
@@ -33,7 +33,7 @@ def test_inline_scheduler_backend(tmp_path: Path) -> None:
 
 
 def test_qdrant_adapter_fallback_search() -> None:
-    store = build_vector_store("qdrant", url="http://localhost:6333", collection="test_beehive_collection")
+    store = build_vector_store("qdrant", url="http://localhost:6333", collection="test_beekeeper_collection")
     store.upsert("item-1", "queen worker architecture")
     hits = store.search("queen architecture", limit=3)
     assert "item-1" in hits

@@ -1,8 +1,8 @@
 # 01 — System Overview
 
-## What Is Beehive?
+## What Is Beekeeper?
 
-**Beehive Agent Platform** is a **multi-agent orchestration system** modeled on a beehive metaphor:
+**Beekeeper Agent Platform** is a **multi-agent orchestration system** modeled on a beekeeper metaphor:
 
 - A **Queen Agent** is the central planner/router. It decomposes user requests into sub-tasks and delegates them to workers.
 - **Workers** are ephemeral: they receive one task, execute it, persist their result to the Honeycomb, and terminate.
@@ -23,7 +23,7 @@
 
 ## Lifecycle of a Request
 
-1. **Entry point**: CLI (`beehive run`), Beekeeper API, Queen API, Slack/Telegram/Discord webhook, or `BeehiveClient` SDK.
+1. **Entry point**: CLI (`beekeeper run`), Beekeeper API, Queen API, Slack/Telegram/Discord webhook, or `BeekeeperClient` SDK.
 2. **Queen.run()**: The Queen agent receives `intent + payload`.
 3. **Decomposition**: Queen calls an LLM to decompose the intent into atomic sub-tasks (`TaskEnvelope`).
 4. **Guardrail evaluation**: `GuardrailPolicyEngine` checks each task (schema, PII, jailbreak, domain, budget).
@@ -56,7 +56,7 @@
 ## Package Entry Points
 
 ```
-beehive         → beehive.runner:main        (CLI: beehive run / chat / doctor / up / etc.)
+beekeeper         → beekeeper.runner:main        (CLI: beekeeper run / chat / doctor / up / etc.)
 beekeeper-api   → beekeeper_api.app:main     (Management REST API on :8787)
 queen-api       → queen_api.app:main         (OpenAI-compatible chat API on :8788)
 ```

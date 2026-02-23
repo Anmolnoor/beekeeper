@@ -147,7 +147,7 @@ def run_command_job(
     cmd_str = payload.get("cmd", "").strip()
     if not cmd_str:
         return False, "missing cmd"
-    default_allowlist = frozenset({"beehive metrics", "beehive review list"})
+    default_allowlist = frozenset({"beekeeper metrics", "beekeeper review list"})
     allowlist = config.command_allowlist if config.command_allowlist is not None else default_allowlist
     if allowlist and cmd_str not in allowlist:
         allowed = ", ".join(allowlist)

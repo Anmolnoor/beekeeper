@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from beehive.channels import ChatHub
-from beehive.queen import QueenAgent, QueenConfig
-from beehive.security import sign_payload, verify_payload
-from beehive.store import BeekeeperStore
+from beekeeper.channels import ChatHub
+from beekeeper.queen import QueenAgent, QueenConfig
+from beekeeper.security import sign_payload, verify_payload
+from beekeeper.store import BeekeeperStore
 
 
 def test_blueprint_profiles_seeded(tmp_path: Path) -> None:

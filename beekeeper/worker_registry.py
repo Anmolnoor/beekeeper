@@ -64,11 +64,11 @@ def _worker_kind_from_str(s: str) -> WorkerKind:
 
 
 def _registry_roots(honeycomb_root: Path) -> list[Path]:
-    """Return registry search roots: honeycomb first, then project-local .beehive."""
+    """Return registry search roots: honeycomb first, then project-local .beekeeper."""
     roots = [Path(honeycomb_root)]
-    beehive_dir = Path(honeycomb_root).resolve().parent / ".beehive"
-    if beehive_dir.exists():
-        roots.append(beehive_dir)
+    beekeeper_dir = Path(honeycomb_root).resolve().parent / ".beekeeper"
+    if beekeeper_dir.exists():
+        roots.append(beekeeper_dir)
     return roots
 
 
@@ -134,6 +134,21 @@ class WorkerRegistry:
         Pick the best worker for this task.
         Returns (selected_worker, fallback_workers).
         """
+        kind, fallbacks, _, _content = self.select_worker_with_metadata(intent, payload, query)
+        return kind, fallbacks
+
+    def select_worker_with_metadata(
+        self,
+        intent: str,
+        payload: dict[str, Any],
+        query: str = "",
+    ) -> tuple[WorkerKind, list[WorkerKind], int, int]:
+        """
+        Pick the best worker for this task.
+        Returns (selected_worker, fallback_workers, best_score, content_score).
+        content_score is the score without priority — 0 means no intent/payload/keyword matched.
+        Queen uses content_score==0 to trigger ForgedWorker and auto-spawn a new worker.
+        """
         reg = self._load()
         workers = reg.get("workers", [])
         query_lower = (query or "").lower()
@@ -142,41 +157,42 @@ class WorkerRegistry:
         best_match: dict[str, Any] | None = None
         best_score = -1
 
+        best_content_score = 0
         for w in workers:
             score = 0
             kind_str = w.get("worker_kind", "")
-            try:
-                _ = WorkerKind(kind_str)
-            except ValueError:
+            if not kind_str:
                 continue
 
+            content_score = 0
             if intent_lower in [p.lower() for p in w.get("intent_patterns", [])]:
-                score += 50
+                content_score += 50
             for p in w.get("intent_patterns", []):
                 if p.lower() in intent_lower:
-                    score += 25
+                    content_score += 25
                     break
 
             for key in w.get("payload_triggers", []):
                 if payload.get(key) is not None:
-                    score += 40
+                    content_score += 40
                     break
 
             for kw in w.get("query_keywords", []):
                 if kw.lower() in query_lower:
-                    score += 15
+                    content_score += 15
                     break
 
             for cap in w.get("capabilities", []):
                 if cap.lower() in query_lower or cap.lower() in intent_lower:
-                    score += 10
+                    content_score += 10
                     break
 
-            score += w.get("priority", 0)
+            score = content_score + w.get("priority", 0)
 
             if score > best_score:
                 best_score = score
                 best_match = w
+                best_content_score = content_score
 
         if best_match and best_score > 0:
             kind = _worker_kind_from_str(best_match["worker_kind"])
@@ -184,7 +200,7 @@ class WorkerRegistry:
                 _worker_kind_from_str(f)
                 for f in best_match.get("fallback_workers", [])
             ]
-            return kind, fallbacks
+            return kind, fallbacks, best_score, best_content_score
 
         default = self.get_default_worker()
         default_entry = next(
@@ -192,7 +208,7 @@ class WorkerRegistry:
             None,
         )
         fallbacks = list(default_entry.get("fallback_workers", [])) if default_entry else []
-        return default, [_worker_kind_from_str(f) for f in fallbacks]
+        return default, [_worker_kind_from_str(f) for f in fallbacks], max(0, best_score), 0
 
     def ensure_registry_file(self) -> Path:
         """Create the registry file if missing (so users can edit it)."""

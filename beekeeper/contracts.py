@@ -35,6 +35,7 @@ class WorkerKind(str, Enum):
     monitor = "monitor"
     logger = "logger"
     custom = "custom"
+    forged = "forged"
 
 
 class ProfileType(str, Enum):

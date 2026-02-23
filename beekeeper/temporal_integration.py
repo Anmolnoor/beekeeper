@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
 
+from .audit_logger import log_service_call
 from .worker import execute_task_serialized
 
 try:
@@ -23,7 +24,7 @@ except Exception:  # pragma: no cover - optional dependency path
 class TemporalConfig:
     endpoint: str = "localhost:7233"
     namespace: str = "default"
-    task_queue: str = "beehive-queue"
+    task_queue: str = "beekeeper-queue"
 
 
 if TEMPORAL_AVAILABLE:
@@ -64,7 +65,7 @@ if TEMPORAL_AVAILABLE:
 
 
     @workflow.defn
-    class BeehiveTaskWorkflow:
+    class BeekeeperTaskWorkflow:
         @workflow.run
         async def run(
             self,
@@ -112,7 +113,7 @@ if TEMPORAL_AVAILABLE:
             )
 
 
-class TemporalBeehiveClient:
+class TemporalBeekeeperClient:
     def __init__(self, config: TemporalConfig) -> None:
         if not TEMPORAL_AVAILABLE:
             raise RuntimeError("temporalio_not_installed")
@@ -135,7 +136,7 @@ class TemporalBeehiveClient:
     def _connection_candidates(self) -> list[str]:
         candidates = [self._normalize_endpoint(self.config.endpoint)]
         fallback_raw = os.getenv(
-            "BEEHIVE_TEMPORAL_ENDPOINT_FALLBACKS",
+            "BEEKEEPER_TEMPORAL_ENDPOINT_FALLBACKS",
             "temporal:7233,localhost:7233,host.docker.internal:7233",
         )
         for endpoint in self._parse_fallback_endpoints(fallback_raw):
@@ -174,9 +175,11 @@ class TemporalBeehiveClient:
         gemini_timeout_seconds: int = 120,
         searxng_base_url: str = "http://localhost:8080",
     ) -> dict[str, Any]:
+        trace_id = task_payload.get("queen_trace_id") if isinstance(task_payload, dict) else None
+        log_service_call("temporal", "submitted", source="queen", trace_id=trace_id)
         client = await self.connect()
         payload = await client.execute_workflow(
-            BeehiveTaskWorkflow.run,
+            BeekeeperTaskWorkflow.run,
             args=[
                 task_payload,
                 context_payload,
@@ -208,7 +211,7 @@ class TemporalBeehiveClient:
                 worker = Worker(
                     client,
                     task_queue=self.config.task_queue,
-                    workflows=[BeehiveTaskWorkflow],
+                    workflows=[BeekeeperTaskWorkflow],
                     activities=[execute_worker_activity],
                 )
                 await worker.run()

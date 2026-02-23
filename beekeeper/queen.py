@@ -49,7 +49,8 @@ from .scheduler import (
     retry_backoff_seconds,
 )
 from .soul import load_queen_soul
-from .temporal_integration import TEMPORAL_AVAILABLE, TemporalBeehiveClient, TemporalConfig
+from .audit_logger import log_service_call
+from .temporal_integration import TEMPORAL_AVAILABLE, TemporalBeekeeperClient, TemporalConfig
 from .tracing import Tracer
 from .worker import WorkerContext, WorkerRuntime, execute_task_serialized, make_worker_identity
 from .worker_registry import WorkerRegistry
@@ -70,24 +71,24 @@ class QueenConfig:
     scheduler_timeout_seconds: int = 60
     temporal_endpoint: str = "localhost:7233"
     temporal_namespace: str = "default"
-    temporal_task_queue: str = "beehive-queue"
+    temporal_task_queue: str = "beekeeper-queue"
     vector_backend: str = "memory"  # memory | qdrant
     vector_collection: str = "honeycomb_memory"
     vector_url: str = "http://localhost:6333"
     queen_soul_profile_id: str = "soul.queen.crown"
-    llm_provider: str = field(default_factory=lambda: os.getenv("BEEHIVE_LLM_PROVIDER", "ollama"))
-    llm_providers: str = field(default_factory=lambda: os.getenv("BEEHIVE_LLM_PROVIDERS", ""))
-    ollama_base_url: str = field(default_factory=lambda: os.getenv("BEEHIVE_OLLAMA_BASE_URL", "http://100.99.106.59:11434"))
-    ollama_model: str = field(default_factory=lambda: os.getenv("BEEHIVE_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"))
-    ollama_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEHIVE_OLLAMA_TIMEOUT_SECONDS", "120")))
-    gemini_api_key: str = field(default_factory=lambda: os.getenv("BEEHIVE_GEMINI_API_KEY", ""))
-    gemini_model: str = field(default_factory=lambda: os.getenv("BEEHIVE_GEMINI_MODEL", "gemini-1.5-flash"))
-    gemini_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEHIVE_GEMINI_TIMEOUT_SECONDS", "120")))
-    openai_api_key: str = field(default_factory=lambda: os.getenv("BEEHIVE_OPENAI_API_KEY", ""))
-    openai_model: str = field(default_factory=lambda: os.getenv("BEEHIVE_OPENAI_MODEL", "gpt-4o-mini"))
-    openai_base_url: str | None = field(default_factory=lambda: os.getenv("BEEHIVE_OPENAI_BASE_URL") or None)
-    openai_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEHIVE_OPENAI_TIMEOUT_SECONDS", "120")))
-    searxng_base_url: str = field(default_factory=lambda: os.getenv("BEEHIVE_SEARXNG_BASE_URL", "http://localhost:8080"))
+    llm_provider: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDER", "ollama"))
+    llm_providers: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDERS", ""))
+    ollama_base_url: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"))
+    ollama_model: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OLLAMA_MODEL", "llama3.2"))
+    ollama_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")))
+    gemini_api_key: str = field(default_factory=lambda: os.getenv("BEEKEEPER_GEMINI_API_KEY", ""))
+    gemini_model: str = field(default_factory=lambda: os.getenv("BEEKEEPER_GEMINI_MODEL", "gemini-1.5-flash"))
+    gemini_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEKEEPER_GEMINI_TIMEOUT_SECONDS", "120")))
+    openai_api_key: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OPENAI_API_KEY", ""))
+    openai_model: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OPENAI_MODEL", "gpt-4o-mini"))
+    openai_base_url: str | None = field(default_factory=lambda: os.getenv("BEEKEEPER_OPENAI_BASE_URL") or None)
+    openai_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEKEEPER_OPENAI_TIMEOUT_SECONDS", "120")))
+    searxng_base_url: str = field(default_factory=lambda: os.getenv("BEEKEEPER_SEARXNG_BASE_URL", "http://localhost:8080"))
     auto_approve_human_reviews: bool = False
     queen_blueprint_id: str = "blueprint.queen.default"
     worker_web_blueprint_id: str = "blueprint.worker.web"
@@ -151,22 +152,22 @@ class QueenAgent:
 
     def _build_scheduler(self) -> Scheduler | None:
         if self.config.scheduler_backend == "celery":
-            os.environ.setdefault("BEEHIVE_CELERY_BROKER_URL", self.config.celery_broker_url)
-            os.environ.setdefault("BEEHIVE_CELERY_BACKEND_URL", self.config.celery_backend_url)
-            os.environ.setdefault("BEEHIVE_HONEYCOMB_ROOT", str(self.config.honeycomb_root.resolve()))
-            os.environ.setdefault("BEEHIVE_VECTOR_BACKEND", self.config.vector_backend)
-            os.environ.setdefault("BEEHIVE_VECTOR_COLLECTION", self.config.vector_collection)
-            os.environ.setdefault("BEEHIVE_VECTOR_URL", self.config.vector_url)
-            os.environ.setdefault("BEEHIVE_LLM_PROVIDER", self.config.llm_provider)
+            os.environ.setdefault("BEEKEEPER_CELERY_BROKER_URL", self.config.celery_broker_url)
+            os.environ.setdefault("BEEKEEPER_CELERY_BACKEND_URL", self.config.celery_backend_url)
+            os.environ.setdefault("BEEKEEPER_HONEYCOMB_ROOT", str(self.config.honeycomb_root.resolve()))
+            os.environ.setdefault("BEEKEEPER_VECTOR_BACKEND", self.config.vector_backend)
+            os.environ.setdefault("BEEKEEPER_VECTOR_COLLECTION", self.config.vector_collection)
+            os.environ.setdefault("BEEKEEPER_VECTOR_URL", self.config.vector_url)
+            os.environ.setdefault("BEEKEEPER_LLM_PROVIDER", self.config.llm_provider)
             if self.config.llm_providers:
-                os.environ.setdefault("BEEHIVE_LLM_PROVIDERS", self.config.llm_providers)
-            os.environ.setdefault("BEEHIVE_OLLAMA_BASE_URL", self.config.ollama_base_url)
-            os.environ.setdefault("BEEHIVE_OLLAMA_MODEL", self.config.ollama_model)
-            os.environ.setdefault("BEEHIVE_OLLAMA_TIMEOUT_SECONDS", str(self.config.ollama_timeout_seconds))
-            os.environ.setdefault("BEEHIVE_GEMINI_API_KEY", self.config.gemini_api_key)
-            os.environ.setdefault("BEEHIVE_GEMINI_MODEL", self.config.gemini_model)
-            os.environ.setdefault("BEEHIVE_GEMINI_TIMEOUT_SECONDS", str(self.config.gemini_timeout_seconds))
-            os.environ.setdefault("BEEHIVE_SEARXNG_BASE_URL", self.config.searxng_base_url)
+                os.environ.setdefault("BEEKEEPER_LLM_PROVIDERS", self.config.llm_providers)
+            os.environ.setdefault("BEEKEEPER_OLLAMA_BASE_URL", self.config.ollama_base_url)
+            os.environ.setdefault("BEEKEEPER_OLLAMA_MODEL", self.config.ollama_model)
+            os.environ.setdefault("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", str(self.config.ollama_timeout_seconds))
+            os.environ.setdefault("BEEKEEPER_GEMINI_API_KEY", self.config.gemini_api_key)
+            os.environ.setdefault("BEEKEEPER_GEMINI_MODEL", self.config.gemini_model)
+            os.environ.setdefault("BEEKEEPER_GEMINI_TIMEOUT_SECONDS", str(self.config.gemini_timeout_seconds))
+            os.environ.setdefault("BEEKEEPER_SEARXNG_BASE_URL", self.config.searxng_base_url)
             return CeleryScheduler(
                 broker_url=self.config.celery_broker_url,
                 backend_url=self.config.celery_backend_url,
@@ -418,11 +419,78 @@ class QueenAgent:
             return "skill.monitor.audit"
         if task.worker_kind == WorkerKind.heavy_compute:
             return "skill.compute.heavy"
+        if task.worker_kind == WorkerKind.forged:
+            return "skill.research.web"
         return "skill.research.web"
+
+    def _auto_spawn_worker(self, intent: str, payload: dict[str, Any]) -> None:
+        """Register a new custom worker blueprint when no content match exists for this intent.
+        The spawned worker uses ForgedWorker (LLM) for execution but is persisted to the registry
+        so future requests with the same intent pattern are correctly routed.
+        """
+        worker_kind_str = f"custom_{intent.lower().replace(' ', '_').replace('-', '_')}"
+        # Check if already registered (avoid duplicate spawning)
+        existing = next(
+            (w for w in self.worker_registry.list_workers() if w.get("worker_kind") == worker_kind_str),
+            None,
+        )
+        if existing:
+            return
+        name = intent.replace("_", " ").replace("-", " ").title()
+        query_hint = str(payload.get("query") or payload.get("topic") or "").strip()
+        keywords = [w for w in query_hint.lower().split() if len(w) > 3][:5] if query_hint else []
+        self.worker_registry.register_custom_worker(
+            worker_kind=worker_kind_str,
+            name=name,
+            description=f"Auto-spawned worker for intent: {intent}",
+            capabilities=["custom"],
+            intent_patterns=[intent],
+            payload_triggers=[],
+            query_keywords=keywords,
+            priority=15,
+            persist=True,
+        )
+        skill_id = f"skill.custom.{worker_kind_str}"
+        self.registry.register_skill(
+            SkillProfile(
+                skill_profile_id=skill_id,
+                name=name,
+                description=f"Skills for auto-spawned worker: {intent}",
+                capabilities=["custom"],
+                tool_allowlist=[],
+                can_search_web=False,
+                can_execute_code=False,
+            )
+        )
+        base = self.registry.resolve_profiles("blueprint.queen.default")
+        self.registry.register_blueprint(
+            AgentBlueprint(
+                blueprint_id=f"blueprint.worker.{worker_kind_str}",
+                name=name,
+                agent_type="worker",
+                worker_kind=WorkerKind.custom,
+                profile_bundle=ProfileBundleRef(
+                    soul_id=base.soul.soul_profile_id,
+                    abilities_id="abilities.default",
+                    accountabilities_id="accountability.default",
+                    rules_id="rule.default",
+                    guardrails_id="guardrails.default",
+                    skills_id=skill_id,
+                ),
+                tags=["worker", "auto_spawned"],
+                is_template=False,
+            )
+        )
 
     def _route_worker_kind(self, intent: str, payload: dict[str, Any]) -> WorkerKind:
         query = str(payload.get("query") or payload.get("topic") or "").strip()
-        worker_kind, _fallbacks = self.worker_registry.select_worker(intent, payload, query)
+        worker_kind, _fallbacks, best_score, content_score = self.worker_registry.select_worker_with_metadata(
+            intent, payload, query
+        )
+        if content_score == 0:
+            # No intent/payload/keyword matched — auto-spawn a worker for this intent and use ForgedWorker now
+            self._auto_spawn_worker(intent, payload)
+            return WorkerKind.forged
         feedback = self.honeycomb.read_routing_feedback()
         if feedback and worker_kind in {WorkerKind.web_search, WorkerKind.heavy_compute}:
             required_skill = "skill.compute.heavy" if worker_kind == WorkerKind.heavy_compute else "skill.research.web"
@@ -462,6 +530,8 @@ class QueenAgent:
             blueprint_id = self.config.worker_heavy_blueprint_id
         elif task.worker_kind == WorkerKind.audit:
             blueprint_id = self.config.worker_audit_blueprint_id
+        elif task.worker_kind == WorkerKind.forged:
+            blueprint_id = self.config.worker_web_blueprint_id
         resolved = self.registry.resolve_profiles(blueprint_id)
         worker_id = make_worker_identity(
             agent_type=f"worker.{task.task_type}",
@@ -599,14 +669,14 @@ class QueenAgent:
         if self.config.scheduler_backend == "temporal":
             if not TEMPORAL_AVAILABLE:
                 raise RuntimeError("temporal_scheduler_requested_but_temporalio_not_installed")
-            temporal_client = TemporalBeehiveClient(
+            temporal_client = TemporalBeekeeperClient(
                 TemporalConfig(
                     endpoint=self.config.temporal_endpoint,
                     namespace=self.config.temporal_namespace,
                     task_queue=self.config.temporal_task_queue,
                 )
             )
-            workflow_id = f"beehive-{task.queen_trace_id}-{task.task_id}"
+            workflow_id = f"beekeeper-{task.queen_trace_id}-{task.task_id}"
             payload = asyncio_run(
                 temporal_client.execute(
                     workflow_id=workflow_id,
@@ -753,6 +823,7 @@ class QueenAgent:
 
         queen_trace_id = f"trace_{uuid4().hex}"
         queen_request_id = str(uuid4())
+        log_service_call("queen", "called", source=source or "unknown", trace_id=queen_trace_id)
         if session_id and not self.honeycomb.sessions_dir.joinpath(f"{session_id}.json").exists():
             session_id = None
         with self.tracer.span(queen_trace_id, "queen.run") as queen_span:
@@ -799,6 +870,18 @@ class QueenAgent:
                     queen_context = render_queen_context(
                         queen_context, intent=intent, domain=domain, worker_kind=""
                     )
+                    # Inject Queen memories and semantic search for full platform stack
+                    query_or_intent = str(payload.get("query") or payload.get("topic") or intent).strip()
+                    queen_memories = self.honeycomb.read_queen_memories(limit=10)
+                    semantic_hits = self.honeycomb.semantic_search_with_content(query_or_intent, limit=5)
+                    mem_lines: list[str] = []
+                    if queen_memories:
+                        mem_lines.extend(f"- {m.get('content', '')}" for m in queen_memories[:10] if m.get("content"))
+                    if semantic_hits:
+                        contents = [text for _, text in semantic_hits if text and text.strip()]
+                        mem_lines.extend(f"- {c}" for c in contents[:5])
+                    if mem_lines:
+                        queen_context = queen_context + "\n\n## Relevant past context (from memory)\n" + "\n".join(mem_lines)
                     memories = payload.get("user_memories") or []
                     if isinstance(memories, list) and memories:
                         mem_text = "\n".join(f"- {m}" if isinstance(m, str) else str(m.get("content", m)) for m in memories[:15])
@@ -813,12 +896,12 @@ class QueenAgent:
                         if self.config.llm_provider == "gemini":
                             assistant_reply = (
                                 "I could not reach Gemini right now. "
-                                "Set BEEHIVE_GEMINI_API_KEY and ensure API access."
+                                "Set BEEKEEPER_GEMINI_API_KEY and ensure API access."
                             )
                         else:
                             assistant_reply = (
                                 "I could not reach Ollama right now. "
-                                "Set BEEHIVE_OLLAMA_BASE_URL and ensure Ollama is running."
+                                "Set BEEKEEPER_OLLAMA_BASE_URL and ensure Ollama is running."
                             )
                     output = {
                         "query": query,
@@ -848,6 +931,15 @@ class QueenAgent:
                         "semantic_hits_for_intent": self.honeycomb.semantic_search(intent),
                     }
             _emit("Decomposing request into executable tasks…")
+            # Enrich payload with Queen memories and semantic context for workers
+            query_or_intent = str(payload.get("query") or payload.get("topic") or intent).strip()
+            if query_or_intent:
+                queen_mems = self.honeycomb.read_queen_memories(limit=10)
+                semantic_hits = self.honeycomb.semantic_search_with_content(query_or_intent, limit=5)
+                if queen_mems:
+                    payload["_queen_memories"] = [m.get("content", "") for m in queen_mems[:10] if m.get("content")]
+                if semantic_hits:
+                    payload["_semantic_context"] = [text for _, text in semantic_hits if text and text.strip()][:5]
             tasks = self.decompose_intent(queen_trace_id, queen_request_id, intent, payload)
             results: list[ResultEnvelope] = []
             for task in tasks:

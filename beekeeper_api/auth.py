@@ -10,8 +10,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import bcrypt
 from jose import JWTError, jwt
 
-from beehive.store import BeekeeperStore
-from beehive.tenancy import UserRecord
+from beekeeper.store import BeekeeperStore
+from beekeeper.tenancy import UserRecord
 
 from .deps import get_store
 

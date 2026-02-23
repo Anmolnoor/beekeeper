@@ -12,37 +12,39 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from beehive.channels import ChatHub
-from beehive.ops import compute_ops_metrics
-from beehive.queen import QueenAgent, QueenConfig
-from beehive.queen_updates import list_queen_updates
-from beehive.store import BeekeeperStore
-from beehive.tenancy import UserRecord
-from beehive.user_memory import extract_memories
+from beekeeper.audit_logger import log_service_call
+from beekeeper.channels import ChatHub
+from beekeeper.ops import compute_ops_metrics
+from beekeeper.queen import QueenAgent, QueenConfig
+from beekeeper.queen_updates import list_queen_updates
+from beekeeper.store import BeekeeperStore
+from beekeeper.tenancy import UserRecord
+from beekeeper.user_memory import extract_memories
 
 from .auth import create_access_token, get_current_user, hash_password, verify_password
 from .deps import get_honeycomb, get_store, get_worker_registry
+from .setup import is_fresh_install, is_setup_done, mark_setup_done, read_env_from_file, write_env_from_config
 
 router = APIRouter()
 
 
-# def _get_whatsapp_config() -> dict[str, Any] | None:
-#     """WhatsApp config from store + env (env overrides). Allows full config via .env."""
-#     import os
-#
-#     store = get_store()
-#     config = dict(store.get_channel_config_decrypted("whatsapp") or {})
-#     env_keys = [
-#         ("WHATSAPP_ACCESS_TOKEN", "whatsapp_access_token"),
-#         ("WHATSAPP_PHONE_NUMBER_ID", "whatsapp_phone_number_id"),
-#         ("WHATSAPP_APP_SECRET", "whatsapp_app_secret"),
-#         ("WHATSAPP_VERIFY_TOKEN", "whatsapp_verify_token"),
-#     ]
-#     for env_name, config_key in env_keys:
-#         val = os.getenv(env_name)
-#         if val:
-#             config[config_key] = val
-#     return config if (config.get("whatsapp_access_token") or config.get("whatsapp_verify_token")) else None
+def _get_whatsapp_config() -> dict[str, Any] | None:
+    """WhatsApp config from store + env (env overrides). Allows full config via .env."""
+    import os
+
+    store = get_store()
+    config = dict(store.get_channel_config_decrypted("whatsapp") or {})
+    env_keys = [
+        ("WHATSAPP_ACCESS_TOKEN", "whatsapp_access_token"),
+        ("WHATSAPP_PHONE_NUMBER_ID", "whatsapp_phone_number_id"),
+        ("WHATSAPP_APP_SECRET", "whatsapp_app_secret"),
+        ("WHATSAPP_VERIFY_TOKEN", "whatsapp_verify_token"),
+    ]
+    for env_name, config_key in env_keys:
+        val = os.getenv(env_name)
+        if val:
+            config[config_key] = val
+    return config if (config.get("whatsapp_access_token") or config.get("whatsapp_verify_token")) else None
 
 
 def _can_access_chat(chat: dict[str, Any], user_id: str) -> bool:
@@ -85,6 +87,25 @@ class OnboardingRequest(BaseModel):
     queen_blueprint_id: str = "blueprint.queen.default"
     admin_email: str | None = None
     admin_password: str | None = None
+
+
+class SetupCompleteRequest(BaseModel):
+    """First-run wizard completion payload."""
+    llm_provider: str = "ollama"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b"
+    gemini_api_key: str = ""
+    openai_api_key: str = ""
+    telegram_bot_token: str = ""
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_app_secret: str = ""
+    whatsapp_verify_token: str = ""
+    org_name: str = "Default Organization"
+    hive_name: str = "Main Hive"
+    admin_email: str = ""
+    admin_password: str = ""
+    create_linux_user: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -166,6 +187,281 @@ def auth_register(body: RegisterRequest) -> dict[str, Any]:
 @router.get("/api/auth/me")
 def auth_me(user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
     return {"user_id": user.user_id, "email": user.email}
+
+
+@router.get("/api/setup/status")
+def setup_status() -> dict[str, Any]:
+    """Returns whether first-run wizard is needed. No auth required."""
+    return {
+        "needs_setup": is_fresh_install(),
+        "setup_done": is_setup_done(),
+    }
+
+
+def _get_setup_config(mask_secrets: bool = False) -> dict[str, Any]:
+    """Build config dict for setup form. Used by GET /api/setup/config and GET /api/env."""
+    import os
+
+    env = read_env_from_file()
+    tg: dict[str, Any] = {}
+    wa: dict[str, Any] = {}
+    first_org = None
+    first_hive = None
+    try:
+        store = get_store()
+        tg = store.get_channel_config_decrypted("telegram") or {}
+        wa = store.get_channel_config_decrypted("whatsapp") or {}
+        orgs = store.list_orgs()
+        first_org = orgs[0] if orgs else None
+        if first_org:
+            hives = store.list_hives(first_org.org_id)
+            first_hive = hives[0] if hives else None
+    except Exception:
+        pass
+
+    def _mask(val: str) -> str:
+        return "***" if (mask_secrets and val) else (val or "")
+
+    return {
+        "llm_provider": env.get("BEEKEEPER_LLM_PROVIDER") or os.environ.get("BEEKEEPER_LLM_PROVIDER", "ollama"),
+        "ollama_base_url": env.get("BEEKEEPER_OLLAMA_BASE_URL") or os.environ.get("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
+        "ollama_model": env.get("BEEKEEPER_OLLAMA_MODEL") or os.environ.get("BEEKEEPER_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
+        "gemini_api_key": _mask(env.get("BEEKEEPER_GEMINI_API_KEY") or os.environ.get("BEEKEEPER_GEMINI_API_KEY", "")),
+        "openai_api_key": _mask(env.get("BEEKEEPER_OPENAI_API_KEY") or os.environ.get("BEEKEEPER_OPENAI_API_KEY", "")),
+        "telegram_bot_token": _mask(str(tg.get("telegram_bot_token", ""))),
+        "whatsapp_access_token": _mask(env.get("WHATSAPP_ACCESS_TOKEN") or wa.get("whatsapp_access_token", "") or os.environ.get("WHATSAPP_ACCESS_TOKEN", "")),
+        "whatsapp_phone_number_id": env.get("WHATSAPP_PHONE_NUMBER_ID") or wa.get("whatsapp_phone_number_id", "") or os.environ.get("WHATSAPP_PHONE_NUMBER_ID", ""),
+        "org_name": first_org.name if first_org else "Default Organization",
+        "hive_name": first_hive.name if first_hive else "Main Hive",
+    }
+
+
+@router.get("/api/setup/config")
+def setup_config() -> dict[str, Any]:
+    """Returns current env/config values for setup form pre-population. No auth required."""
+    return _get_setup_config(mask_secrets=False)
+
+
+@router.post("/api/setup/complete")
+def setup_complete(body: SetupCompleteRequest) -> dict[str, Any]:
+    """Complete first-run wizard: write .env, bootstrap tenant, mark done. No auth required."""
+    if is_setup_done():
+        raise HTTPException(status_code=400, detail="setup_already_done")
+    if not is_fresh_install():
+        raise HTTPException(status_code=400, detail="not_fresh_install")
+
+    env_config: dict[str, str] = {
+        "BEEKEEPER_LLM_PROVIDER": body.llm_provider,
+        "BEEKEEPER_OLLAMA_BASE_URL": body.ollama_base_url,
+        "BEEKEEPER_OLLAMA_MODEL": body.ollama_model,
+        "BEEKEEPER_STORE_ROOT": ".beekeeper_store",
+    }
+    import os
+    for k, v in env_config.items():
+        os.environ[k] = v
+    if body.gemini_api_key:
+        env_config["BEEKEEPER_GEMINI_API_KEY"] = body.gemini_api_key
+    if body.openai_api_key:
+        env_config["BEEKEEPER_OPENAI_API_KEY"] = body.openai_api_key
+    if body.whatsapp_access_token:
+        env_config["WHATSAPP_ACCESS_TOKEN"] = body.whatsapp_access_token
+    if body.whatsapp_phone_number_id:
+        env_config["WHATSAPP_PHONE_NUMBER_ID"] = body.whatsapp_phone_number_id
+    if body.whatsapp_app_secret:
+        env_config["WHATSAPP_APP_SECRET"] = body.whatsapp_app_secret
+    if body.whatsapp_verify_token:
+        env_config["WHATSAPP_VERIFY_TOKEN"] = body.whatsapp_verify_token
+
+    write_env_from_config(env_config)
+
+    if body.create_linux_user:
+        _try_create_beekeeper_user()
+
+    store = get_store()
+    if body.telegram_bot_token:
+        store.write_channel_config("telegram", {"telegram_bot_token": body.telegram_bot_token})
+    if body.whatsapp_access_token or body.whatsapp_verify_token:
+        wa = store.get_channel_config_decrypted("whatsapp") or {}
+        if body.whatsapp_access_token:
+            wa["whatsapp_access_token"] = body.whatsapp_access_token
+        if body.whatsapp_phone_number_id:
+            wa["whatsapp_phone_number_id"] = body.whatsapp_phone_number_id
+        if body.whatsapp_app_secret:
+            wa["whatsapp_app_secret"] = body.whatsapp_app_secret
+        if body.whatsapp_verify_token:
+            wa["whatsapp_verify_token"] = body.whatsapp_verify_token
+        store.write_channel_config("whatsapp", wa)
+
+    bootstrap = OnboardingRequest(
+        org_name=body.org_name,
+        hive_name=body.hive_name,
+        admin_email=body.admin_email or None,
+        admin_password=body.admin_password or None,
+    )
+    result = onboarding_bootstrap(bootstrap)
+    mark_setup_done()
+    result["setup_done"] = True
+    return result
+
+
+def _try_create_beekeeper_user() -> None:
+    """Create sandboxed beekeeper-agent user on Linux. Skips on macOS/Docker."""
+    import platform
+    import subprocess
+    if platform.system() != "Linux":
+        return
+    try:
+        subprocess.run(
+            ["useradd", "-r", "-m", "-s", "/bin/bash", "beekeeper-agent"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
+_SKIP_SECRET = "***"  # When user submits this, do not overwrite existing secret
+
+
+@router.get("/api/env")
+def get_env(user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    """Returns current env/config values for dashboard. Auth required. Masks secrets."""
+    return _get_setup_config(mask_secrets=True)
+
+
+@router.post("/api/env")
+def update_env(
+    body: SetupCompleteRequest,
+    user: Annotated[UserRecord, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Update .env from dashboard. Auth required. Does not run onboarding."""
+    import os
+
+    env_config: dict[str, str] = {
+        "BEEKEEPER_LLM_PROVIDER": body.llm_provider,
+        "BEEKEEPER_OLLAMA_BASE_URL": body.ollama_base_url,
+        "BEEKEEPER_OLLAMA_MODEL": body.ollama_model,
+    }
+    if body.gemini_api_key and body.gemini_api_key != _SKIP_SECRET:
+        env_config["BEEKEEPER_GEMINI_API_KEY"] = body.gemini_api_key
+    if body.openai_api_key and body.openai_api_key != _SKIP_SECRET:
+        env_config["BEEKEEPER_OPENAI_API_KEY"] = body.openai_api_key
+    if body.whatsapp_access_token != _SKIP_SECRET:
+        env_config["WHATSAPP_ACCESS_TOKEN"] = body.whatsapp_access_token or ""
+    env_config["WHATSAPP_PHONE_NUMBER_ID"] = body.whatsapp_phone_number_id or ""
+    if getattr(body, "whatsapp_app_secret", "") and getattr(body, "whatsapp_app_secret", "") != _SKIP_SECRET:
+        env_config["WHATSAPP_APP_SECRET"] = body.whatsapp_app_secret
+    if getattr(body, "whatsapp_verify_token", "") and getattr(body, "whatsapp_verify_token", "") != _SKIP_SECRET:
+        env_config["WHATSAPP_VERIFY_TOKEN"] = body.whatsapp_verify_token
+
+    write_env_from_config(env_config)
+
+    store = get_store()
+    if body.telegram_bot_token and body.telegram_bot_token != _SKIP_SECRET:
+        store.write_channel_config("telegram", {"telegram_bot_token": body.telegram_bot_token})
+    wa = store.get_channel_config_decrypted("whatsapp") or {}
+    if body.whatsapp_access_token != _SKIP_SECRET:
+        wa["whatsapp_access_token"] = body.whatsapp_access_token or ""
+    wa["whatsapp_phone_number_id"] = body.whatsapp_phone_number_id or ""
+    if getattr(body, "whatsapp_app_secret", "") and getattr(body, "whatsapp_app_secret", "") != _SKIP_SECRET:
+        wa["whatsapp_app_secret"] = body.whatsapp_app_secret
+    if getattr(body, "whatsapp_verify_token", "") and getattr(body, "whatsapp_verify_token", "") != _SKIP_SECRET:
+        wa["whatsapp_verify_token"] = body.whatsapp_verify_token
+    store.write_channel_config("whatsapp", wa)
+
+    for k, v in env_config.items():
+        os.environ[k] = v
+
+    return {"ok": True, "message": "Environment updated. Restart beekeeper-api and queen-api for changes to take effect."}
+
+
+class ApprovalActionRequest(BaseModel):
+    approver: str = "operator"
+    note: str | None = None
+
+
+@router.get("/api/approvals")
+def list_approvals(
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """List pending HITL approval requests."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    pending = honeycomb.list_pending_reviews()
+    return {
+        "pending_count": len(pending),
+        "approvals": [r.model_dump(mode="json") for r in pending],
+    }
+
+
+@router.get("/api/approvals/{review_id}")
+def get_approval(
+    review_id: str,
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Get a single approval/review by ID."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    review = honeycomb.get_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="approval_not_found")
+    return review.model_dump(mode="json")
+
+
+@router.post("/api/approvals/{review_id}/approve")
+def approve_review(
+    review_id: str,
+    body: ApprovalActionRequest = ApprovalActionRequest(),
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Approve a pending HITL request and optionally resume the task."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    review = honeycomb.get_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="approval_not_found")
+    if review.status != "pending":
+        return {"review": review.model_dump(mode="json"), "resumed": False}
+    root = Path(honeycomb_root)
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    queen = QueenAgent(QueenConfig(honeycomb_root=root))
+    result = queen.resume_human_review(
+        review_id,
+        approver=body.approver or user.email or "operator",
+        approved=True,
+        note=body.note or "",
+    )
+    resolved = honeycomb.get_review(review_id)
+    return {
+        "review": resolved.model_dump(mode="json") if resolved else {},
+        "resumed": result.get("resumed", False),
+        "run": result.get("run"),
+    }
+
+
+@router.post("/api/approvals/{review_id}/reject")
+def reject_review(
+    review_id: str,
+    body: ApprovalActionRequest = ApprovalActionRequest(),
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Reject a pending HITL request."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    review = honeycomb.get_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="approval_not_found")
+    if review.status != "pending":
+        return {"review": review.model_dump(mode="json")}
+    resolved = honeycomb.resolve_review(
+        review_id,
+        approved=False,
+        approver=body.approver or user.email or "operator",
+        note=body.note,
+    )
+    return {"review": resolved.model_dump(mode="json")}
 
 
 @router.get("/api/init/status")
@@ -286,7 +582,7 @@ def list_templates(user: Annotated[UserRecord, Depends(get_current_user)]) -> di
 def create_template(payload: dict[str, Any], user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
     store = get_store()
     try:
-        from beehive.contracts import AgentBlueprint
+        from beekeeper.contracts import AgentBlueprint
 
         blueprint = AgentBlueprint.model_validate(payload["blueprint"])
     except Exception as exc:
@@ -395,8 +691,6 @@ async def channel_webhook_get(
     hub_challenge: str | None = Query(None, alias="hub.challenge"),
 ):
     """WhatsApp webhook verification (GET). Meta sends hub.mode, hub.verify_token, hub.challenge."""
-    if channel == "whatsapp":
-        raise HTTPException(status_code=404, detail="not_found")  # WhatsApp disabled
     if channel != "whatsapp":
         raise HTTPException(status_code=404, detail="not_found")
     if hub_mode != "subscribe" or not hub_verify_token or not hub_challenge:
@@ -410,15 +704,16 @@ async def channel_webhook_get(
 
 @router.post("/api/channels/{channel}/webhook")
 async def channel_webhook(channel: str, request: Request):
-    from beehive.channel_auth import verify_slack_signature
-    from beehive.channels import ChatHub
-    from beehive.queen import QueenAgent, QueenConfig
+    from beekeeper.channel_auth import verify_slack_signature
+    from beekeeper.channels import ChatHub
+    from beekeeper.queen import QueenAgent, QueenConfig
 
     body = await request.body()
     store = get_store()
     if channel == "whatsapp":
-        raise HTTPException(status_code=404, detail="channel_not_configured")  # WhatsApp disabled
-    config = store.get_channel_config_decrypted(channel)
+        config = _get_whatsapp_config()
+    else:
+        config = store.get_channel_config_decrypted(channel)
     if not config:
         raise HTTPException(status_code=404, detail="channel_not_configured")
 
@@ -437,8 +732,8 @@ async def channel_webhook(channel: str, request: Request):
                 text = ev.get("text", "")
                 user_id = ev.get("user", "unknown")
                 channel_id = ev.get("channel", "")
-                from beehive.channel_allowlist import check_channel_allowlist
-                from beehive.channel_mention import check_mention_required, _get_slack_bot_user_id
+                from beekeeper.channel_allowlist import check_channel_allowlist
+                from beekeeper.channel_mention import check_mention_required, _get_slack_bot_user_id
                 allowed, reason = check_channel_allowlist(config, channel_id, user_id)
                 if not allowed:
                     return JSONResponse(content={"ok": True})  # Silently ignore; avoid leaking allowlist
@@ -448,7 +743,7 @@ async def channel_webhook(channel: str, request: Request):
                     return JSONResponse(content={"ok": True})  # Silently ignore when require_mention and no @mention
                 is_dm = ev.get("channel_type") == "im"
                 if config.get("require_dm_pairing") and is_dm:
-                    from beehive.channel_pairing import looks_like_pairing_code
+                    from beekeeper.channel_pairing import looks_like_pairing_code
                     if store.is_dm_paired("slack", user_id):
                         pass
                     elif looks_like_pairing_code(text):
@@ -478,12 +773,14 @@ async def channel_webhook(channel: str, request: Request):
                 model_override = store.resolve_llm_model(honeycomb_root=honeycomb_root)
                 if model_override:
                     dispatch_payload["model_override"] = model_override
+                log_service_call("beekeeper_api", "called", source="channel:slack")
                 queen = QueenAgent(QueenConfig(honeycomb_root=Path(honeycomb_root)))
                 hub = ChatHub(queen)
                 result = hub.dispatch(
                     "slack",
                     dispatch_payload,
                     intent="research_topic",
+                    source="channel:slack",
                 )
                 bot_token = config.get("slack_bot_token")
                 if bot_token:
@@ -517,8 +814,8 @@ async def channel_webhook(channel: str, request: Request):
             text = msg.get("text", "")
             user_id = str(msg.get("from", {}).get("id", "unknown"))
             chat_id = msg.get("chat", {}).get("id")
-            from beehive.channel_allowlist import check_channel_allowlist
-            from beehive.channel_mention import check_mention_required
+            from beekeeper.channel_allowlist import check_channel_allowlist
+            from beekeeper.channel_mention import check_mention_required
             allowed, reason = check_channel_allowlist(config, str(chat_id) if chat_id is not None else None, user_id)
             if not allowed:
                 return JSONResponse(content={"ok": True})
@@ -529,7 +826,7 @@ async def channel_webhook(channel: str, request: Request):
                 return JSONResponse(content={"ok": True})  # Silently ignore when require_mention
             is_dm = chat_type == "private"
             if config.get("require_dm_pairing") and is_dm:
-                from beehive.channel_pairing import looks_like_pairing_code
+                from beekeeper.channel_pairing import looks_like_pairing_code
                 if store.is_dm_paired("telegram", user_id):
                     pass
                 elif text and looks_like_pairing_code(text):
@@ -568,9 +865,10 @@ async def channel_webhook(channel: str, request: Request):
                 model_override = store.resolve_llm_model(honeycomb_root=honeycomb_root)
                 if model_override:
                     dispatch_payload["model_override"] = model_override
+                log_service_call("beekeeper_api", "called", source="channel:telegram")
                 queen = QueenAgent(QueenConfig(honeycomb_root=Path(honeycomb_root)))
                 hub = ChatHub(queen)
-                result = hub.dispatch("telegram", dispatch_payload, intent="research_topic")
+                result = hub.dispatch("telegram", dispatch_payload, intent="research_topic", source="channel:telegram")
                 bot_token = (config or {}).get("telegram_bot_token")
                 if bot_token:
                     resp = result.get("response", {})
@@ -587,7 +885,7 @@ async def channel_webhook(channel: str, request: Request):
         return JSONResponse(content={"ok": True})
 
     if channel == "discord":
-        from beehive.channel_auth import verify_discord_signature
+        from beekeeper.channel_auth import verify_discord_signature
 
         public_key = config.get("discord_public_key")
         sig = request.headers.get("x-signature-ed25519", "")
@@ -612,7 +910,7 @@ async def channel_webhook(channel: str, request: Request):
             user = payload.get("member", {}).get("user") or payload.get("user", {})
             user_id = str(user.get("id", "unknown"))
             channel_id = payload.get("channel_id", "")
-            from beehive.channel_allowlist import check_channel_allowlist
+            from beekeeper.channel_allowlist import check_channel_allowlist
             allowed, reason = check_channel_allowlist(config, channel_id, user_id)
             if not allowed:
                 return JSONResponse(content={"type": 4, "data": {"content": "You do not have access to this bot.", "flags": 64}})
@@ -621,12 +919,14 @@ async def channel_webhook(channel: str, request: Request):
             model_override = store.resolve_llm_model(honeycomb_root=honeycomb_root)
             if model_override:
                 dispatch_payload["model_override"] = model_override
+            log_service_call("beekeeper_api", "called", source="channel:discord")
             queen = QueenAgent(QueenConfig(honeycomb_root=Path(honeycomb_root)))
             hub = ChatHub(queen)
             result = hub.dispatch(
                 "discord",
                 dispatch_payload,
                 intent="research_topic",
+                source="channel:discord",
             )
             resp = result.get("response", {})
             results = resp.get("results", [])
@@ -634,72 +934,88 @@ async def channel_webhook(channel: str, request: Request):
             return JSONResponse(content={"type": 4, "data": {"content": reply[:2000]}})
         return JSONResponse(content={"type": 1})
 
-    # if channel == "whatsapp":
-    #     from beehive.channel_auth import verify_whatsapp_signature
-    #
-    #     app_secret = config.get("whatsapp_app_secret")
-    #     sig_header = request.headers.get("x-hub-signature-256", "")
-    #     if app_secret and not verify_whatsapp_signature(body, sig_header, app_secret):
-    #         raise HTTPException(status_code=401, detail="invalid_whatsapp_signature")
-    #     import json as _json
-    #     payload = _json.loads(body)
-    #     entries = payload.get("entry", [])
-    #     for entry in entries:
-    #         for change in entry.get("changes", []):
-    #             if change.get("field") != "messages":
-    #                 continue
-    #             value = change.get("value", {})
-    #             messages = value.get("messages", [])
-    #             phone_number_id = value.get("metadata", {}).get("phone_number_id") or config.get("whatsapp_phone_number_id")
-    #             access_token = config.get("whatsapp_access_token")
-    #             honeycomb_root = config.get("honeycomb_root", ".honeycomb")
-    #             queen = QueenAgent(QueenConfig(honeycomb_root=Path(honeycomb_root)))
-    #             hub = ChatHub(queen)
-    #             whatsapp_chat = store.get_or_create_channel_chat("whatsapp", "WhatsApp")
-    #             chat_id = whatsapp_chat["chat_id"]
-    #             for msg in messages:
-    #                 if msg.get("type") != "text":
-    #                     continue
-    #                 text_obj = msg.get("text", {})
-    #                 text = text_obj.get("body", "")
-    #                 if not text:
-    #                     continue
-    #                 sender = msg.get("from", "unknown")
-    #                 msg_id = msg.get("id", "")
-    #                 store.append_chat_message(chat_id, "user", text, source="whatsapp")
-    #                 result = hub.dispatch(
-    #                     "whatsapp",
-    #                     {"sender": sender, "text": text, "chat_id": sender, "message_id": msg_id},
-    #                     intent="research_topic",
-    #                 )
-    #                 resp = result.get("response", {})
-    #                 results = resp.get("results", [])
-    #                 reply = str(results[0]["output"]) if results and results[0].get("output") else "Request processed."
-    #                 store.append_chat_message(chat_id, "assistant", reply)
-    #                 if access_token and phone_number_id:
-    #                     try:
-    #                         import urllib.request
-    #                         import urllib.parse
-    #                         url = f"https://graph.facebook.com/v21.0/{phone_number_id}/messages"
-    #                         data = _json.dumps({
-    #                             "messaging_product": "whatsapp",
-    #                             "to": sender.replace("@s.whatsapp.net", ""),
-    #                             "type": "text",
-    #                             "text": {"body": reply[:4000]},
-    #                         }).encode("utf-8")
-    #                         req = urllib.request.Request(
-    #                             url,
-    #                             data=data,
-    #                             method="POST",
-    #                             headers={
-    #                                 "Authorization": f"Bearer {access_token}",
-    #                                 "Content-Type": "application/json",
-    #                             },
-    #                         )
-    #                         urllib.request.urlopen(req, timeout=15)
-    #                     except Exception:
-    #                         pass
-    #     return JSONResponse(content={"ok": True})
+    if channel == "whatsapp":
+        from beekeeper.channel_auth import verify_whatsapp_signature
+        from beekeeper.transcribe import fetch_whatsapp_media, transcribe_audio
+
+        app_secret = config.get("whatsapp_app_secret")
+        sig_header = request.headers.get("x-hub-signature-256", "")
+        if app_secret and not verify_whatsapp_signature(body, sig_header, app_secret):
+            raise HTTPException(status_code=401, detail="invalid_whatsapp_signature")
+        import json as _json
+        payload = _json.loads(body)
+        entries = payload.get("entry", [])
+        for entry in entries:
+            for change in entry.get("changes", []):
+                if change.get("field") != "messages":
+                    continue
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                phone_number_id = value.get("metadata", {}).get("phone_number_id") or config.get("whatsapp_phone_number_id")
+                access_token = config.get("whatsapp_access_token")
+                honeycomb_root = config.get("honeycomb_root", ".honeycomb")
+                log_service_call("beekeeper_api", "called", source="channel:whatsapp")
+                queen = QueenAgent(QueenConfig(honeycomb_root=Path(honeycomb_root)))
+                hub = ChatHub(queen)
+                whatsapp_chat = store.get_or_create_channel_chat("whatsapp", "WhatsApp")
+                chat_id = whatsapp_chat["chat_id"]
+                openai_key = config.get("openai_api_key") or __import__("os").environ.get("BEEKEEPER_OPENAI_API_KEY", "")
+                for msg in messages:
+                    msg_type = msg.get("type", "text")
+                    text = ""
+                    if msg_type == "text":
+                        text_obj = msg.get("text", {})
+                        text = text_obj.get("body", "")
+                    elif msg_type in ("audio", "voice"):
+                        media_obj = msg.get("audio") or msg.get("voice") or {}
+                        media_id = media_obj.get("id")
+                        if media_id and access_token:
+                            raw = fetch_whatsapp_media(media_id, access_token)
+                            if raw:
+                                text = transcribe_audio(raw, openai_api_key=openai_key or None)
+                            else:
+                                text = "[Could not fetch audio. Please send a text message.]"
+                        else:
+                            text = "[Audio received. Configure WhatsApp access token for transcription.]"
+                    if not text:
+                        continue
+                    sender = msg.get("from", "unknown")
+                    msg_id = msg.get("id", "")
+                    store.append_chat_message(chat_id, "user", text, source="whatsapp")
+                    result = hub.dispatch(
+                        "whatsapp",
+                        {"sender": sender, "text": text, "chat_id": sender, "message_id": msg_id},
+                        intent="research_topic",
+                        source="channel:whatsapp",
+                    )
+                    resp = result.get("response", {})
+                    results = resp.get("results", [])
+                    reply = str(results[0]["output"]) if results and results[0].get("output") else "Request processed."
+                    store.append_chat_message(chat_id, "assistant", reply)
+                    if access_token and phone_number_id:
+                        try:
+                            import urllib.request
+                            import urllib.parse
+                            url = f"https://graph.facebook.com/v21.0/{phone_number_id}/messages"
+                            data = _json.dumps({
+                                "messaging_product": "whatsapp",
+                                "to": sender.replace("@s.whatsapp.net", ""),
+                                "type": "text",
+                                "text": {"body": reply[:4000]},
+                            }).encode("utf-8")
+                            req = urllib.request.Request(
+                                url,
+                                data=data,
+                                method="POST",
+                                headers={
+                                    "Authorization": f"Bearer {access_token}",
+                                    "Content-Type": "application/json",
+                                },
+                            )
+                            urllib.request.urlopen(req, timeout=15)
+                        except Exception:
+                            pass
+        return JSONResponse(content={"ok": True})
 
     raise HTTPException(status_code=400, detail="webhook_not_supported_for_channel")
 
@@ -768,8 +1084,11 @@ def slack_oauth_callback(
 
 @router.post("/api/chat/run")
 def run_chat(body: RunChatRequest, user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    log_service_call("beekeeper_api", "called", source="beekeeper_api:chat_run")
     queen = _queen_from_request(body)
-    return queen.run(intent=body.intent, payload=body.payload)
+    result = queen.run(intent=body.intent, payload=body.payload, source="beekeeper_api:chat_run")
+    log_service_call("queen", "completed", source="beekeeper_api:chat_run", trace_id=result.get("trace_id"))
+    return result
 
 
 # --- ChatGPT-style persistent chats ---
@@ -790,10 +1109,9 @@ def list_chats(
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
     store = get_store()
-    # # Ensure WhatsApp chat exists when channel is configured (shows in sidebar)
-    # whatsapp_config = _get_whatsapp_config()
-    # if whatsapp_config and whatsapp_config.get("whatsapp_access_token"):
-    #     store.get_or_create_channel_chat("whatsapp", "WhatsApp")
+    whatsapp_config = _get_whatsapp_config()
+    if whatsapp_config and whatsapp_config.get("whatsapp_access_token"):
+        store.get_or_create_channel_chat("whatsapp", "WhatsApp")
     chats = store.list_chats(user.user_id, limit=limit)
     return {"chats": chats}
 
@@ -831,6 +1149,7 @@ def send_chat_message(
     store.append_chat_message(chat_id, "user", content)
     memories = [{"content": m["content"]} for m in store.list_user_memories(user.user_id)]
     payload = {"query": content, "messages": prior, "user_memories": memories}
+    log_service_call("beekeeper_api", "called", source="web_ui")
     queen = QueenAgent(
         QueenConfig(
             honeycomb_root=Path(body.honeycomb_root),
@@ -838,7 +1157,8 @@ def send_chat_message(
             vector_backend=body.vector,
         )
     )
-    result = queen.run(intent=body.intent, payload=payload)
+    result = queen.run(intent=body.intent, payload=payload, source="web_ui")
+    log_service_call("queen", "completed", source="web_ui", trace_id=result.get("trace_id"))
     results = result.get("results", [])
     raw_output = results[0].get("output", {}) if results else {}
     reply = ""
@@ -884,6 +1204,7 @@ async def send_chat_message_stream(
     result_holder: list[dict[str, Any]] = []
 
     def _run() -> None:
+        log_service_call("beekeeper_api", "called", source="web_ui")
         queen = QueenAgent(
             QueenConfig(
                 honeycomb_root=Path(body.honeycomb_root),
@@ -895,7 +1216,8 @@ async def send_chat_message_stream(
         def on_status(msg: str) -> None:
             status_queue.put(msg)
 
-        result = queen.run(intent=body.intent, payload=payload, status_callback=on_status)
+        result = queen.run(intent=body.intent, payload=payload, status_callback=on_status, source="web_ui")
+        log_service_call("queen", "completed", source="web_ui", trace_id=result.get("trace_id"))
         status_queue.put(None)  # sentinel
         results = result.get("results", [])
         raw_output = results[0].get("output", {}) if results else {}
@@ -969,9 +1291,13 @@ def delete_chat(
 
 @router.post("/api/chat/channel")
 def run_channel_chat(body: ChannelRunRequest, user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    log_service_call("beekeeper_api", "called", source=f"beekeeper_api:channel:{body.channel}")
     queen = QueenAgent(QueenConfig(honeycomb_root=Path(body.honeycomb_root)))
     hub = ChatHub(queen)
-    return hub.dispatch(body.channel, body.payload, intent=body.intent)
+    result = hub.dispatch(body.channel, body.payload, intent=body.intent, source=f"channel:{body.channel}")
+    trace_id = result.get("response", {}).get("trace_id") if isinstance(result.get("response"), dict) else None
+    log_service_call("queen", "completed", source=f"channel:{body.channel}", trace_id=trace_id)
+    return result
 
 
 @router.get("/api/traces")
@@ -1074,10 +1400,81 @@ def get_queen_context(
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
     from pathlib import Path as P
-    from beehive.queen_context import ensure_queen_context_file, load_queen_context
+    from beekeeper.queen_context import ensure_queen_context_file, load_queen_context
     root = P(honeycomb_root) if P(honeycomb_root).is_absolute() else P.cwd() / honeycomb_root
     ensure_queen_context_file(root)
     return {"context": load_queen_context(root), "path": str(root / "context" / "queen.md")}
+
+
+@router.get("/api/audit/logs")
+def get_audit_logs(
+    limit: int = Query(100, ge=1, le=500),
+    since: str | None = Query(None, description="ISO8601 timestamp; only return logs after this time"),
+    service: str | None = Query(None, description="Filter by service (redis, queen, qdrant, etc.)"),
+    source: str | None = Query(None, description="Filter by source (queen_api, web_ui, etc.)"),
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """List recent audit log entries (service invocations)."""
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    root = Path(honeycomb_root)
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    audit_dir = root / "audit"
+    if not audit_dir.exists():
+        return {"logs": [], "count": 0}
+
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    entries: list[dict[str, Any]] = []
+    today = datetime.now(timezone.utc)
+    # Read last 7 days of audit files (most recent first)
+    for day_offset in range(8):
+        d = today - timedelta(days=day_offset)
+        path = audit_dir / f"{d.strftime('%Y%m%d')}.jsonl"
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        at = row.get("at", "")
+                        if since_dt and at:
+                            try:
+                                at_dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                                if at_dt.tzinfo is None:
+                                    at_dt = at_dt.replace(tzinfo=timezone.utc)
+                                if at_dt < since_dt:
+                                    continue
+                            except ValueError:
+                                pass
+                        if service and row.get("service") != service:
+                            continue
+                        if source and row.get("source") != source:
+                            continue
+                        entries.append(row)
+                    except json.JSONDecodeError:
+                        pass
+        except OSError:
+            pass
+
+    # Sort by at descending (most recent first)
+    entries.sort(key=lambda e: e.get("at", ""), reverse=True)
+    entries = entries[:limit]
+    return {"logs": entries, "count": len(entries)}
 
 
 @router.get("/api/stream/events")

@@ -1,26 +1,26 @@
-# Markdown Agent Config (BEEHIVE.md, AGENTS.md, SOUL.md)
+# Markdown Agent Config (BEEKEEPER.md, AGENTS.md, SOUL.md)
 
-Beehive loads agent context from markdown files in a well-defined order. Place these in your project root, `~/.beehive/agent/` (global defaults), or `.honeycomb/context/`.
+Beekeeper loads agent context from markdown files in a well-defined order. Place these in your project root, `~/.beekeeper/agent/` (global defaults), or `.honeycomb/context/`.
 
 ## Load Order
 
-1. **~/.beehive/agent/** (global defaults)
+1. **~/.beekeeper/agent/** (global defaults)
 2. **Project root and parent dirs** (walking up from honeycomb root)
 3. **.honeycomb/context/queen.md**
 
-Each directory is searched for `BEEHIVE.md`, `AGENTS.md`, `SOUL.md` in that order. Files are concatenated with `---` separators. Missing files are skipped.
+Each directory is searched for `BEEKEEPER.md`, `AGENTS.md`, `SOUL.md` in that order. Files are concatenated with `---` separators. Missing files are skipped.
 
 ## File Purposes
 
 | File | Purpose |
 |------|---------|
-| **BEEHIVE.md** | Project/hive description, setup, environment notes |
+| **BEEKEEPER.md** | Project/hive description, setup, environment notes |
 | **AGENTS.md** | Agent roles, capabilities, routing hints, multi-agent layout |
 | **SOUL.md** | Persona, tone, operational doctrine. Supplements `queen.soul.json` traits |
 
 ## Examples
 
-### BEEHIVE.md
+### BEEKEEPER.md
 ```markdown
 # Acme Ops Hive
 
@@ -60,4 +60,4 @@ Both are used. The JSON drives runtime behavior; SOUL.md adds narrative context 
 
 ## .honeycomb/context/queen.md
 
-Project-specific override. Created by `beehive` init if missing. Takes precedence over project-level BEEHIVE.md/AGENTS.md/SOUL.md for local overrides.
+Project-specific override. Created by `beekeeper` init if missing. Takes precedence over project-level BEEKEEPER.md/AGENTS.md/SOUL.md for local overrides.

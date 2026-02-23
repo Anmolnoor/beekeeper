@@ -3,11 +3,11 @@
 The Queen reads this to know who she is, what she has, and how to communicate.
 
 Markdown Agent Config (load order):
-  1. ~/.beehive/agent/ (global: BEEHIVE.md, AGENTS.md, SOUL.md)
-  2. Project root and parent dirs: BEEHIVE.md, AGENTS.md, SOUL.md
+  1. ~/.beekeeper/agent/ (global: BEEKEEPER.md, AGENTS.md, SOUL.md)
+  2. Project root and parent dirs: BEEKEEPER.md, AGENTS.md, SOUL.md
   3. .honeycomb/context/queen.md
 
-- BEEHIVE.md: Project/hive description, setup
+- BEEKEEPER.md: Project/hive description, setup
 - AGENTS.md: Agent roles, capabilities, routing hints
 - SOUL.md: Persona, tone, operational doctrine (supplements queen.soul.json)
 
@@ -57,10 +57,10 @@ Workers return a **ResultEnvelope** with `output` containing their response. For
 ## How to Present Responses to the User
 - **Direct chat**: Reply naturally, conversationally. Be helpful and concise.
 - **After worker delegation**: Surface `assistant_reply` (or the main answer field) as the primary response. Optionally mention synthesis/evidence briefly.
-- **Errors**: If a worker fails or Ollama is unreachable, explain clearly and suggest next steps (e.g. "Ollama is not reachable. Ensure it is running at BEEHIVE_OLLAMA_BASE_URL.").
+- **Errors**: If a worker fails or Ollama is unreachable, explain clearly and suggest next steps (e.g. "Ollama is not reachable. Ensure it is running at BEEKEEPER_OLLAMA_BASE_URL.").
 """
 
-_CONTEXT_FILENAMES = ("BEEHIVE.md", "AGENTS.md", "SOUL.md")
+_CONTEXT_FILENAMES = ("BEEKEEPER.md", "AGENTS.md", "SOUL.md")
 
 
 def _read_file_safe(path: Path) -> str | None:
@@ -74,7 +74,7 @@ def _read_file_safe(path: Path) -> str | None:
 
 
 def _load_from_dir(dir_path: Path) -> list[str]:
-    """Load BEEHIVE.md, AGENTS.md, SOUL.md from a directory, in order. Returns list of non-empty contents."""
+    """Load BEEKEEPER.md, AGENTS.md, SOUL.md from a directory, in order. Returns list of non-empty contents."""
     parts: list[str] = []
     for name in _CONTEXT_FILENAMES:
         content = _read_file_safe(dir_path / name)
@@ -101,16 +101,16 @@ def load_queen_context(honeycomb_root: Path) -> str:
     """Load Queen context from multiple sources and merge.
 
     Search order:
-      1. ~/.beehive/agent/ (BEEHIVE.md, AGENTS.md) - global defaults
-      2. Project root and parent dirs: BEEHIVE.md, AGENTS.md
+      1. ~/.beekeeper/agent/ (BEEKEEPER.md, AGENTS.md) - global defaults
+      2. Project root and parent dirs: BEEKEEPER.md, AGENTS.md
       3. .honeycomb/context/queen.md
       4. DEFAULT_QUEEN_CONTEXT if nothing found
     """
     parts: list[str] = []
 
-    # 1. Global defaults from ~/.beehive/agent/
+    # 1. Global defaults from ~/.beekeeper/agent/
     home = Path.home()
-    global_agent_dir = home / ".beehive" / "agent"
+    global_agent_dir = home / ".beekeeper" / "agent"
     if global_agent_dir.exists():
         for content in _load_from_dir(global_agent_dir):
             parts.append(content)

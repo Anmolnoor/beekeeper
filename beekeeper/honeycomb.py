@@ -221,6 +221,11 @@ class HoneycombStore:
                 "reason": reason,
             },
         )
+        try:
+            from .notifications import send_approval_notification
+            send_approval_notification(review.review_id, task.task_id, reason)
+        except Exception:
+            pass
         return review
 
     def get_review(self, review_id: str) -> HumanReviewRecord | None:
@@ -397,6 +402,10 @@ class HoneycombStore:
     def semantic_search(self, query: str, limit: int = 5) -> list[str]:
         return self.vector_store.search(query, limit=limit)
 
+    def semantic_search_with_content(self, query: str, limit: int = 5) -> list[tuple[str, str]]:
+        """Return [(item_id, text), ...] for context injection into prompts."""
+        return self.vector_store.search_with_content(query, limit=limit)
+
     def _backlog_path(self) -> Path:
         return self.backlog_dir / "tasks.jsonl"
 
@@ -546,7 +555,7 @@ class HoneycombStore:
         all_traces: bool = False,
         min_age_hours: float = 0,
     ) -> dict[str, Any]:
-        """Compact trace files. See beehive.trace_compaction.compact_traces."""
+        """Compact trace files. See beekeeper.trace_compaction.compact_traces."""
         from .trace_compaction import compact_traces as _compact
         return _compact(
             self.root_dir,
