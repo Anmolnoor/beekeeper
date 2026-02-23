@@ -221,6 +221,39 @@ def test_worker_registry_register_custom_worker_persists(tmp_path: Path) -> None
     assert "custom_persisted" in kinds
 
 
+def test_worker_registry_register_custom_worker_merges_existing(tmp_path: Path) -> None:
+    registry = WorkerRegistry(tmp_path / ".honeycomb")
+    registry.ensure_registry_file()
+    registry.register_custom_worker(
+        worker_kind="custom_merge",
+        name="Merge Worker",
+        description="first",
+        capabilities=["alpha"],
+        intent_patterns=["merge_a"],
+        query_keywords=["alpha"],
+        fallback_workers=["web_search"],
+        priority=10,
+        persist=True,
+    )
+    registry.register_custom_worker(
+        worker_kind="custom_merge",
+        name="Merge Worker",
+        description="second",
+        capabilities=["beta"],
+        intent_patterns=["merge_b"],
+        query_keywords=["beta"],
+        fallback_workers=["heavy_compute"],
+        priority=15,
+        persist=True,
+    )
+    worker = next(w for w in registry.list_workers() if w.get("worker_kind") == "custom_merge")
+    assert set(worker["capabilities"]) >= {"alpha", "beta"}
+    assert set(worker["intent_patterns"]) >= {"merge_a", "merge_b"}
+    assert set(worker["query_keywords"]) >= {"alpha", "beta"}
+    assert set(worker["fallback_workers"]) >= {"web_search", "heavy_compute"}
+    assert int(worker["priority"]) == 15
+
+
 # ---------------------------------------------------------------------------
 # Action loop integration tests
 # ---------------------------------------------------------------------------

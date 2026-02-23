@@ -96,6 +96,20 @@
       if (token()) h['Authorization'] = 'Bearer ' + token();
       return fetch(API + url, { ...opts, headers: h });
     }
+    async function readErrorDetail(resp) {
+      let detail = '';
+      try {
+        const text = await resp.text();
+        if (!text) return '';
+        try {
+          const parsed = JSON.parse(text);
+          detail = parsed.detail || parsed.message || text;
+        } catch (_) {
+          detail = text;
+        }
+      } catch (_) {}
+      return String(detail || '').trim();
+    }
     function serviceClass(s) {
       if (!s) return 'service-default';
       return 'service-' + String(s).toLowerCase().replace(/[^a-z0-9]/g, '_');
@@ -114,7 +128,11 @@
           tbody.innerHTML = '<tr><td colspan="5">Please <a href="/dashboard">sign in</a> to view logs.</td></tr>';
           return;
         }
-        if (!r.ok) throw new Error('Failed to load');
+        if (!r.ok) {
+          const detail = await readErrorDetail(r);
+          const msg = 'Failed to load logs (' + r.status + (detail ? ': ' + detail : '') + ')';
+          throw new Error(msg);
+        }
         const data = await r.json();
         const logs = data.logs || [];
         if (logs.length === 0) {

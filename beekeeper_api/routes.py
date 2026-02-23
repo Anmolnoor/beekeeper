@@ -5,6 +5,7 @@ import hmac
 import json
 import queue
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -19,7 +20,6 @@ from beekeeper.queen import QueenAgent, QueenConfig
 from beekeeper.queen_updates import list_queen_updates
 from beekeeper.store import BeekeeperStore
 from beekeeper.tenancy import UserRecord
-from beekeeper.user_memory import extract_memories
 
 from .auth import create_access_token, get_current_user, hash_password, verify_password
 from .deps import get_honeycomb, get_store, get_worker_registry
@@ -50,6 +50,78 @@ def _get_whatsapp_config() -> dict[str, Any] | None:
 def _can_access_chat(chat: dict[str, Any], user_id: str) -> bool:
     """Allow access if user owns the chat or it's a channel chat (WhatsApp, etc.)."""
     return chat.get("user_id") == user_id or chat.get("user_id") == "__channel__"
+
+
+def _parse_iso_dt(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _activity_window(window: str) -> tuple[datetime, datetime, int, int]:
+    now = datetime.now(timezone.utc)
+    if window == "24h":
+        step_seconds = 3600
+        bucket_count = 24
+    else:
+        step_seconds = 300
+        bucket_count = 12
+    start = now - timedelta(seconds=step_seconds * bucket_count)
+    aligned_epoch = int(start.timestamp())
+    aligned_epoch -= aligned_epoch % step_seconds
+    start = datetime.fromtimestamp(aligned_epoch, tz=timezone.utc)
+    return now, start, step_seconds, bucket_count
+
+
+def _bucket_index(at: datetime, start: datetime, step_seconds: int, bucket_count: int) -> int | None:
+    pos = int((at - start).total_seconds() // step_seconds)
+    if 0 <= pos < bucket_count:
+        return pos
+    return None
+
+
+def _enqueue_context_curation(
+    *,
+    body: "SendMessageRequest",
+    user_id: str,
+    chat_id: str,
+    user_msg: str,
+    assistant_reply: str,
+) -> None:
+    if not user_msg.strip() or not assistant_reply.strip():
+        return
+
+    def _run() -> None:
+        try:
+            queen = QueenAgent(
+                QueenConfig(
+                    honeycomb_root=Path(body.honeycomb_root),
+                    scheduler_backend=body.scheduler,
+                    vector_backend=body.vector,
+                )
+            )
+            queen.run(
+                intent="context_curation",
+                payload={
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "user_msg": user_msg[:1200],
+                    "assistant_reply": assistant_reply[:3000],
+                    "honeycomb_root": body.honeycomb_root,
+                    "delegate_to_worker": True,
+                },
+                source="web_ui:context_curator",
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 class CreateOrgRequest(BaseModel):
@@ -122,7 +194,7 @@ class RunChatRequest(BaseModel):
     intent: str = "research_topic"
     payload: dict[str, Any] = Field(default_factory=dict)
     honeycomb_root: str = ".honeycomb"
-    scheduler: str = "inline"
+    scheduler: str = "auto"
     vector: str = "memory"
 
 
@@ -141,7 +213,7 @@ class SendMessageRequest(BaseModel):
     content: str
     honeycomb_root: str = ".honeycomb"
     intent: str = "research_topic"
-    scheduler: str = "inline"
+    scheduler: str = "auto"
     vector: str = "memory"
 
 
@@ -1147,7 +1219,7 @@ def send_chat_message(
         raise HTTPException(status_code=400, detail="Message content required")
     prior = [{"role": m["role"], "content": m["content"]} for m in chat.get("messages", [])]
     store.append_chat_message(chat_id, "user", content)
-    memories = [{"content": m["content"]} for m in store.list_user_memories(user.user_id)]
+    memories = [{"content": m["content"]} for m in store.search_user_memories(user.user_id, query=content, limit=18)]
     payload = {"query": content, "messages": prior, "user_memories": memories, "delegate_to_worker": True, "use_web_search": True}
     log_service_call("beekeeper_api", "called", source="web_ui")
     queen = QueenAgent(
@@ -1173,8 +1245,13 @@ def send_chat_message(
     if not reply:
         reply = str(raw_output) if raw_output else "No response."
     store.append_chat_message(chat_id, "assistant", reply)
-    for mem in extract_memories(content, reply, honeycomb_root=body.honeycomb_root):
-        store.append_user_memory(user.user_id, mem, chat_id=chat_id)
+    _enqueue_context_curation(
+        body=body,
+        user_id=user.user_id,
+        chat_id=chat_id,
+        user_msg=content,
+        assistant_reply=reply,
+    )
     updated = store.get_chat(chat_id)
     return {"chat": updated, "reply": reply, "result": result}
 
@@ -1197,7 +1274,7 @@ async def send_chat_message_stream(
         raise HTTPException(status_code=400, detail="Message content required")
     prior = [{"role": m["role"], "content": m["content"]} for m in chat.get("messages", [])]
     store.append_chat_message(chat_id, "user", content)
-    memories = [{"content": m["content"]} for m in store.list_user_memories(user.user_id)]
+    memories = [{"content": m["content"]} for m in store.search_user_memories(user.user_id, query=content, limit=18)]
     payload = {"query": content, "messages": prior, "user_memories": memories}
 
     status_queue: queue.Queue[str | None] = queue.Queue()
@@ -1233,8 +1310,13 @@ async def send_chat_message_stream(
         if not reply:
             reply = str(raw_output) if raw_output else "No response."
         store.append_chat_message(chat_id, "assistant", reply)
-        for mem in extract_memories(content, reply, honeycomb_root=body.honeycomb_root):
-            store.append_user_memory(user.user_id, mem, chat_id=chat_id)
+        _enqueue_context_curation(
+            body=body,
+            user_id=user.user_id,
+            chat_id=chat_id,
+            user_msg=content,
+            assistant_reply=reply,
+        )
         updated = store.get_chat(chat_id)
         result_holder.append({"chat": updated, "reply": reply})
 
@@ -1367,10 +1449,152 @@ def get_analytics_latency(
     honeycomb_root: str = ".honeycomb",
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
-    root = Path(honeycomb_root)
-    if not root.is_absolute():
-        root = Path.cwd() / root
-    return compute_ops_metrics(root)
+    honeycomb = get_honeycomb(honeycomb_root)
+    return compute_ops_metrics(honeycomb.root_dir)
+
+
+@router.get("/api/activity/series")
+def get_activity_series(
+    window: str = Query("1h", pattern="^(1h|24h)$"),
+    honeycomb_root: str = ".honeycomb",
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    now, start, step_seconds, bucket_count = _activity_window(window)
+    bucket_starts = [start + timedelta(seconds=step_seconds * i) for i in range(bucket_count)]
+    chat_series = [0 for _ in range(bucket_count)]
+    worker_series = [{"running": 0, "completed": 0, "failed": 0} for _ in range(bucket_count)]
+    hive_series = [0 for _ in range(bucket_count)]
+
+    store = get_store()
+    honeycomb = get_honeycomb(honeycomb_root)
+
+    active_chat_ids: set[str] = set()
+    running_chat_requests = 0
+    total_chat_messages = 0
+    running_cutoff = now - timedelta(minutes=30)
+    chats_dir = store.root / "chats"
+    for chat_file in chats_dir.glob("*.json"):
+        try:
+            chat_payload = json.loads(chat_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        chat_id = str(chat_payload.get("chat_id") or chat_file.stem)
+        messages = chat_payload.get("messages") or []
+        last_message_time: datetime | None = None
+        last_message_role = ""
+        for msg in messages:
+            created_at = _parse_iso_dt(msg.get("created_at"))
+            if created_at is None:
+                continue
+            if created_at >= start and created_at <= now:
+                idx = _bucket_index(created_at, start, step_seconds, bucket_count)
+                if idx is not None:
+                    chat_series[idx] += 1
+                    total_chat_messages += 1
+                    active_chat_ids.add(chat_id)
+            if last_message_time is None or created_at > last_message_time:
+                last_message_time = created_at
+                last_message_role = str(msg.get("role", ""))
+        if last_message_time and last_message_role == "user" and last_message_time >= running_cutoff:
+            running_chat_requests += 1
+
+    completed_window = 0
+    failed_window = 0
+    queued_window = 0
+    blocked_window = 0
+    by_worker: dict[str, dict[str, int]] = {}
+    latest_task_status: dict[str, tuple[datetime, str]] = {}
+    events_dir = honeycomb.root_dir / "events"
+    for file_path in events_dir.glob("*.jsonl"):
+        try:
+            with file_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    row = line.strip()
+                    if not row:
+                        continue
+                    try:
+                        event = json.loads(row)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("kind") != "task":
+                        continue
+                    at = _parse_iso_dt(event.get("at"))
+                    if at is None:
+                        continue
+                    status = str(event.get("status") or event.get("task", {}).get("status") or "unknown")
+                    task_id = str(event.get("task_id") or event.get("task", {}).get("task_id") or "")
+                    worker_kind = str(event.get("worker_kind") or event.get("task", {}).get("worker_kind") or "unknown")
+                    if task_id:
+                        prev = latest_task_status.get(task_id)
+                        if prev is None or at > prev[0]:
+                            latest_task_status[task_id] = (at, status)
+                    if not (start <= at <= now):
+                        continue
+                    idx = _bucket_index(at, start, step_seconds, bucket_count)
+                    if idx is None:
+                        continue
+                    hive_series[idx] += 1
+                    if worker_kind not in by_worker:
+                        by_worker[worker_kind] = {"running": 0, "completed": 0, "failed": 0, "queued": 0, "blocked": 0}
+                    if status == "running":
+                        worker_series[idx]["running"] += 1
+                        by_worker[worker_kind]["running"] += 1
+                    elif status == "success":
+                        worker_series[idx]["completed"] += 1
+                        completed_window += 1
+                        by_worker[worker_kind]["completed"] += 1
+                    elif status == "failed":
+                        worker_series[idx]["failed"] += 1
+                        failed_window += 1
+                        by_worker[worker_kind]["failed"] += 1
+                    elif status == "queued":
+                        queued_window += 1
+                        by_worker[worker_kind]["queued"] += 1
+                    elif status == "blocked":
+                        blocked_window += 1
+                        by_worker[worker_kind]["blocked"] += 1
+        except OSError:
+            continue
+
+    running_now = sum(1 for _, status in latest_task_status.values() if status == "running")
+    window_hours = (bucket_count * step_seconds) / 3600.0
+    throughput_per_hour = round(completed_window / window_hours, 2) if window_hours > 0 else 0.0
+
+    return {
+        "window": window,
+        "from": start.isoformat(),
+        "to": now.isoformat(),
+        "bucket_size_seconds": step_seconds,
+        "chat": {
+            "total_messages": total_chat_messages,
+            "active_chats": len(active_chat_ids),
+            "running_requests": running_chat_requests,
+            "series": [{"ts": bucket_starts[i].isoformat(), "count": chat_series[i]} for i in range(bucket_count)],
+        },
+        "workers": {
+            "running": running_now,
+            "completed": completed_window,
+            "failed": failed_window,
+            "queued": queued_window,
+            "blocked": blocked_window,
+            "series": [
+                {
+                    "ts": bucket_starts[i].isoformat(),
+                    "running": worker_series[i]["running"],
+                    "completed": worker_series[i]["completed"],
+                    "failed": worker_series[i]["failed"],
+                }
+                for i in range(bucket_count)
+            ],
+            "by_worker": [{"worker_kind": name, **counts} for name, counts in sorted(by_worker.items())],
+        },
+        "hive": {
+            "running_work": running_now,
+            "throughput_per_hour": throughput_per_hour,
+            "events_in_window": sum(hive_series),
+            "series": [{"ts": bucket_starts[i].isoformat(), "work": hive_series[i]} for i in range(bucket_count)],
+        },
+    }
 
 
 @router.get("/api/workers/registry")
@@ -1416,12 +1640,9 @@ def get_audit_logs(
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
     """List recent audit log entries (service invocations)."""
-    import os
     from datetime import datetime, timedelta, timezone
 
-    root = Path(honeycomb_root)
-    if not root.is_absolute():
-        root = Path.cwd() / root
+    root = get_honeycomb(honeycomb_root).root_dir
     audit_dir = root / "audit"
     if not audit_dir.exists():
         return {"logs": [], "count": 0}

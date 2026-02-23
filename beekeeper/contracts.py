@@ -36,6 +36,7 @@ class WorkerKind(str, Enum):
     logger = "logger"
     custom = "custom"
     forged = "forged"
+    context_curator = "context_curator"
 
 
 class ProfileType(str, Enum):
@@ -299,6 +300,24 @@ class AuditOutput(BaseModel):
     score: float = Field(default=0.5, ge=0.0, le=1.0)
     findings: list[AuditFinding] = Field(default_factory=list)
     verdict: Literal["pass", "review", "fail"] = "review"
+
+
+class CuratedMemoryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str
+    tier: Literal["profile_fact", "project_preference", "ephemeral_note"]
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ContextCuratorOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    saved_user_memories: int = 0
+    saved_queen_memories: int = 0
+    saved_md_entries: int = 0
+    items: list[CuratedMemoryItem] = Field(default_factory=list)
+    notes: str = ""
 
 
 class TaskEnvelope(BaseModel):

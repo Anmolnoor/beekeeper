@@ -27,7 +27,7 @@ def utcnow() -> datetime:
 @dataclass
 class PulseConfig:
     honeycomb_root: Path
-    interval_seconds: float = 2.0
+    interval_seconds: float = 120.0
     jobs_path: Path | None = None
     max_queen_runs_per_tick: int = 1
     command_allowlist: frozenset[str] | None = None  # None = allow any; else exact match
@@ -196,20 +196,27 @@ def tick(
     honeycomb: HoneycombStore,
     jobs: list[dict[str, Any]],
     on_queen_update: Callable[[dict[str, Any]], None] | None = None,
-) -> list[dict[str, Any]]:
-    """Run one Pulse tick. Returns list of jobs that were run (for persistence)."""
+) -> dict[str, Any]:
+    """Run one Pulse tick and return heartbeat stats."""
     now = utcnow()
     jobs_path = config.jobs_path or _default_jobs_path(config.honeycomb_root)
-    ran: list[dict[str, Any]] = []
+    jobs_total = len(jobs)
+    jobs_enabled = 0
+    jobs_due = 0
+    jobs_ran = 0
+    ran_job_names: list[str] = []
     updated_jobs = list(jobs)
 
     for i, job in enumerate(jobs):
         if not job.get("enabled", True):
             continue
+        jobs_enabled += 1
         if not _job_is_due(job, now):
             continue
+        jobs_due += 1
         payload = job.get("payload") or {}
         kind = payload.get("kind", "queen")
+        job_name = str(job.get("name") or job.get("jobId") or f"job_{i}")
         if kind == "backlog_processor":
             run_backlog_processor(
                 queen,
@@ -218,23 +225,33 @@ def tick(
                 on_update=on_queen_update,
             )
             updated_jobs[i] = _mark_job_run(job)
-            ran.append(job)
+            jobs_ran += 1
+            ran_job_names.append(job_name)
         elif kind == "command":
             ok, out = run_command_job(job, config)
             if on_queen_update:
                 on_queen_update({"kind": "command_result", "job": job.get("name"), "ok": ok, "output": out[:500]})
             updated_jobs[i] = _mark_job_run(job)
-            ran.append(job)
+            jobs_ran += 1
+            ran_job_names.append(job_name)
         elif kind == "queen":
             session_target = job.get("sessionTarget", "isolated")
             run_queen_job(job, queen, session_target, on_update=on_queen_update)
             updated_jobs[i] = _mark_job_run(job)
-            ran.append(job)
+            jobs_ran += 1
+            ran_job_names.append(job_name)
 
     if updated_jobs != jobs:
         _save_jobs(jobs_path, updated_jobs)
 
-    return ran
+    return {
+        "jobs_total": jobs_total,
+        "jobs_enabled": jobs_enabled,
+        "jobs_due": jobs_due,
+        "jobs_ran": jobs_ran,
+        "backlog_size": honeycomb.backlog_size(),
+        "ran_job_names": ran_job_names[:10],
+    }
 
 
 def run_pulse_loop(config: PulseConfig) -> None:
@@ -255,11 +272,28 @@ def run_pulse_loop(config: PulseConfig) -> None:
         )
 
     while True:
+        tick_started_at = utcnow()
+        heartbeat: dict[str, Any] = {
+            "kind": "pulse_heartbeat",
+            "interval_seconds": config.interval_seconds,
+            "jobs_total": 0,
+            "jobs_enabled": 0,
+            "jobs_due": 0,
+            "jobs_ran": 0,
+            "backlog_size": 0,
+            "ran_job_names": [],
+            "tick_started_at": tick_started_at.isoformat(),
+        }
         try:
             jobs = _load_jobs(jobs_path)
-            tick(config, queen, honeycomb, jobs, on_queen_update=_on_update)
+            heartbeat.update(tick(config, queen, honeycomb, jobs, on_queen_update=_on_update))
         except KeyboardInterrupt:
             sys.exit(0)
         except Exception as e:
             honeycomb.write_event("pulse_updates", {"kind": "tick_error", "error": str(e)})
+            heartbeat["error"] = str(e)
+        tick_finished_at = utcnow()
+        heartbeat["tick_finished_at"] = tick_finished_at.isoformat()
+        heartbeat["duration_ms"] = int((tick_finished_at - tick_started_at).total_seconds() * 1000)
+        honeycomb.write_event("pulse_updates", heartbeat)
         time.sleep(config.interval_seconds)

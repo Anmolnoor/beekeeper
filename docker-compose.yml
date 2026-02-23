@@ -149,7 +149,7 @@ services:
       - "8788:8788"
     environment:
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
-      BEEKEEPER_SCHEDULER_BACKEND: inline
+      BEEKEEPER_SCHEDULER_BACKEND: auto
       BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
       BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
       BEEKEEPER_VECTOR_BACKEND: qdrant

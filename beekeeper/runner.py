@@ -140,7 +140,7 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
             print("Commands:")
             print("  /intent <name>      set the active Queen intent")
             print("  /model [name]       set or show LLM model override")
-            print("  /scheduler [be]     set scheduler (inline|celery|temporal)")
+            print("  /scheduler [be]     set scheduler (auto|inline|celery|temporal)")
             print("  /tree [trace_id]    show trace tree")
             print("  /trace [trace_id]   show trace events and details")
             print("  /exit               leave chat")
@@ -166,13 +166,13 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
             continue
         if raw.startswith("/scheduler"):
             rest = raw.replace("/scheduler", "", 1).strip()
-            if rest and rest in ("inline", "celery", "temporal"):
+            if rest and rest in ("auto", "inline", "celery", "temporal"):
                 current_scheduler = rest
                 cfg = _build_config(args, scheduler_override=current_scheduler)
                 queen = QueenAgent(cfg)
                 print(f"queen> scheduler set to '{current_scheduler}'")
             elif rest:
-                print("queen> scheduler must be inline, celery, or temporal")
+                print("queen> scheduler must be auto, inline, celery, or temporal")
             else:
                 print(f"queen> scheduler: {current_scheduler}")
             continue
@@ -871,9 +871,9 @@ def _print_command_guide() -> None:
           Same as rebuild.
       - beekeeper ps
           Shows Beehive container status.
-      - beekeeper run --scheduler <inline|celery|temporal> --vector <memory|qdrant> --query "<text>"
+      - beekeeper run --scheduler <auto|inline|celery|temporal> --vector <memory|qdrant> --query "<text>"
           Runs one Queen request through the selected scheduler/vector backend.
-      - beekeeper chat --scheduler <inline|celery|temporal> --vector <memory|qdrant>
+      - beekeeper chat --scheduler <auto|inline|celery|temporal> --vector <memory|qdrant>
           Starts an interactive Queen chat in your terminal.
       - beekeeper pulse [--interval 2] [--honeycomb-root .honeycomb]
           Runs Pulse tick loop for Queen autonomy (cron jobs, backlog, analyzers).
@@ -1154,7 +1154,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run a beekeeper request")
-    run_parser.add_argument("--scheduler", choices=["inline", "celery", "temporal"], default="inline")
+    run_parser.add_argument("--scheduler", choices=["auto", "inline", "celery", "temporal"], default="auto")
     run_parser.add_argument("--vector", choices=["memory", "qdrant"], default="memory")
     run_parser.add_argument("--intent", default="research_topic")
     run_parser.add_argument("--query", default=None)
@@ -1163,7 +1163,7 @@ def main() -> None:
     run_parser.add_argument("--max-reruns", type=int, default=1)
 
     chat_parser = subparsers.add_parser("chat", help="Interactive Queen chat")
-    chat_parser.add_argument("--scheduler", choices=["inline", "celery", "temporal"], default="inline")
+    chat_parser.add_argument("--scheduler", choices=["auto", "inline", "celery", "temporal"], default="auto")
     chat_parser.add_argument("--vector", choices=["memory", "qdrant"], default="memory")
     chat_parser.add_argument("--intent", default="research_topic")
     chat_parser.add_argument("--honeycomb-root", default=".honeycomb")
@@ -1236,11 +1236,11 @@ def main() -> None:
 
     pulse_parser = subparsers.add_parser("pulse", help="Run Pulse tick loop (Queen autonomy)")
     pulse_parser.add_argument("--honeycomb-root", default=".honeycomb")
-    pulse_parser.add_argument("--interval", type=float, default=2.0, help="Tick interval in seconds")
+    pulse_parser.add_argument("--interval", type=float, default=120.0, help="Tick interval in seconds")
 
     review_parser = subparsers.add_parser("review", help="Manage human approval queue")
     review_parser.add_argument("--honeycomb-root", default=".honeycomb")
-    review_parser.add_argument("--scheduler", choices=["inline", "celery", "temporal"], default="inline")
+    review_parser.add_argument("--scheduler", choices=["auto", "inline", "celery", "temporal"], default="auto")
     review_parser.add_argument("--vector", choices=["memory", "qdrant"], default="memory")
     review_parser.add_argument("--max-reruns", type=int, default=1)
     review_sub = review_parser.add_subparsers(dest="review_command", required=True)

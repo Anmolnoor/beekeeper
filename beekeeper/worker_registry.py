@@ -228,6 +228,7 @@ class WorkerRegistry:
         intent_patterns: list[str],
         payload_triggers: list[str] | None = None,
         query_keywords: list[str] | None = None,
+        fallback_workers: list[str] | None = None,
         priority: int = 15,
         persist: bool = True,
     ) -> dict[str, Any]:
@@ -250,7 +251,7 @@ class WorkerRegistry:
             "payload_triggers": payload_triggers or [],
             "query_keywords": query_keywords or [],
             "priority": priority,
-            "fallback_workers": ["web_search"],
+            "fallback_workers": fallback_workers or ["web_search"],
         }
 
         if persist:
@@ -262,7 +263,18 @@ class WorkerRegistry:
                 data = dict(DEFAULT_REGISTRY)
 
             workers: list[dict[str, Any]] = list(data.get("workers", []))
-            # Replace existing entry with same kind, or append
+            existing = next((w for w in workers if w.get("worker_kind") == worker_kind), None)
+            if existing:
+                merged = dict(existing)
+                merged["name"] = name or existing.get("name")
+                merged["description"] = description or existing.get("description")
+                merged["priority"] = max(int(existing.get("priority", 0)), int(priority))
+                for list_key in ("capabilities", "intent_patterns", "payload_triggers", "query_keywords", "fallback_workers"):
+                    merged_values = [str(v).strip() for v in merged.get(list_key, []) if str(v).strip()]
+                    incoming_values = [str(v).strip() for v in entry.get(list_key, []) if str(v).strip()]
+                    merged[list_key] = list(dict.fromkeys(merged_values + incoming_values))
+                entry = merged
+            # Replace existing entry with same kind, or append.
             updated = [w for w in workers if w.get("worker_kind") != worker_kind]
             updated.append(entry)
             data["workers"] = updated

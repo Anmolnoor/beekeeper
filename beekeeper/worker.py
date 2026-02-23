@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -19,6 +20,8 @@ from .contracts import (
     AccountabilityPolicy,
     AuditFinding,
     AuditOutput,
+    ContextCuratorOutput,
+    CuratedMemoryItem,
     CostMetrics,
     GuardrailProfile,
     HeavyComputeOutput,
@@ -40,6 +43,38 @@ from .web_adapters import SearxngAdapter, WebAdapterError
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _build_user_context_system(payload: dict[str, Any]) -> str | None:
+    memories = payload.get("user_memories") or []
+    lines = []
+    if isinstance(memories, list):
+        for m in memories[:15]:
+            if isinstance(m, str):
+                lines.append(f"- {m}")
+            elif isinstance(m, dict) and m.get("content"):
+                lines.append(f"- {m['content']}")
+    for m in (payload.get("_semantic_context") or [])[:8]:
+        if isinstance(m, str) and m.strip():
+            lines.append(f"- {m.strip()}")
+    for m in (payload.get("_md_memory_context") or [])[:8]:
+        if isinstance(m, str) and m.strip():
+            lines.append(f"- {m.strip()}")
+    bundle = payload.get("_context_bundle")
+    if isinstance(bundle, dict):
+        for m in (bundle.get("semantic_context") or [])[:6]:
+            if isinstance(m, str) and m.strip():
+                lines.append(f"- {m.strip()}")
+    if not lines:
+        return None
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        deduped.append(line)
+    return "User context from past conversations:\n" + "\n".join(deduped[:20])
 
 
 @dataclass
@@ -137,30 +172,17 @@ class WebSearchWorker(BaseSpecialistWorker):
         parsed = urllib.parse.urlparse(url)
         return (parsed.hostname or "").lower()
 
-    def _user_context_system(self, payload: dict[str, Any]) -> str | None:
-        """Build system prompt from user memories if present."""
-        memories = payload.get("user_memories") or []
-        if not isinstance(memories, list) or not memories:
-            return None
-        lines = []
-        for m in memories[:15]:
-            if isinstance(m, str):
-                lines.append(f"- {m}")
-            elif isinstance(m, dict) and m.get("content"):
-                lines.append(f"- {m['content']}")
-        if not lines:
-            return None
-        return "User context from past conversations:\n" + "\n".join(lines)
-
     def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
         query = str(task.payload.get("query") or task.payload.get("topic") or task.task_type).strip()
         use_web_search = task.payload.get("use_web_search", False) is True
-        user_system = self._user_context_system(task.payload)
+        user_system = _build_user_context_system(task.payload)
+        prior = task.payload.get("messages") or []
+        messages = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in prior if isinstance(m, dict)]
         if not use_web_search:
             self._emit_status(context, "Consulting language model for response generation…")
             model_tier = task.payload.get("model_tier")
             assistant_reply, source = self._assistant_reply(
-                query, system=user_system, model_tier=model_tier
+                query, system=user_system, messages=messages or None, model_tier=model_tier
             )
             if assistant_reply is None:
                 assistant_reply = (
@@ -236,7 +258,7 @@ class WebSearchWorker(BaseSpecialistWorker):
         self._emit_status(context, "Synthesizing response from gathered evidence…")
         model_tier = task.payload.get("model_tier")
         assistant_reply, source = self._assistant_reply(
-            query, system=user_system, model_tier=model_tier
+            query, system=user_system, messages=messages or None, model_tier=model_tier
         )
         if assistant_reply is None:
             assistant_reply = (
@@ -319,13 +341,97 @@ class ForgedWorker(BaseSpecialistWorker):
     def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
         self._emit_status(context, "Processing with LLM (no matching worker)…")
         query = str(task.payload.get("query") or task.payload.get("topic") or task.task_type).strip()
-        reply, source = self.llm_router.call(prompt=query, system=None, messages=None)
+        prior = task.payload.get("messages") or []
+        messages = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in prior if isinstance(m, dict)]
+        user_system = _build_user_context_system(task.payload)
+        reply, source = self.llm_router.call(prompt=query, system=user_system, messages=messages or None)
         return WebSearchOutput(
             query=query,
             evidence=[],
             assistant_reply=reply or "I could not process this request.",
             response_source=source,
             synthesis="Forged worker (LLM direct).",
+        ).model_dump(mode="json")
+
+
+class ContextCuratorWorker(BaseSpecialistWorker):
+    """Background worker that curates long-term and daily context memory."""
+
+    worker_kind = WorkerKind.context_curator
+    output_model = ContextCuratorOutput
+
+    def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
+        self._emit_status(context, "Curating context and saving durable memory…")
+        user_id = str(task.payload.get("user_id", "")).strip()
+        chat_id = str(task.payload.get("chat_id", "")).strip() or None
+        user_msg = str(task.payload.get("user_msg", "")).strip()
+        assistant_reply = str(task.payload.get("assistant_reply", "")).strip()
+        honeycomb_root = Path(str(task.payload.get("honeycomb_root") or ".honeycomb"))
+        if not user_msg and not assistant_reply:
+            return ContextCuratorOutput(notes="No conversation content to curate.").model_dump(mode="json")
+
+        from .honeycomb import HoneycombConfig, HoneycombStore
+        from .store import BeekeeperStore
+        from .user_memory import (
+            append_daily_memory_note,
+            append_durable_memory,
+            classify_memory_item,
+            ensure_memory_files,
+            extract_memories,
+            is_sensitive_memory_content,
+        )
+
+        ensure_memory_files(honeycomb_root)
+        extracted = extract_memories(user_msg, assistant_reply, honeycomb_root=honeycomb_root)
+        if not extracted:
+            # Always preserve a brief daily breadcrumb even when extraction has no durable facts.
+            if user_msg:
+                append_daily_memory_note(honeycomb_root, f"User asked: {user_msg[:220]}", source="context_curator")
+                return ContextCuratorOutput(saved_md_entries=1, notes="Saved daily note only.").model_dump(mode="json")
+            return ContextCuratorOutput(notes="No durable memory extracted.").model_dump(mode="json")
+
+        saved_user = 0
+        saved_queen = 0
+        saved_md = 0
+        skipped_sensitive = 0
+        items: list[CuratedMemoryItem] = []
+        store = BeekeeperStore(root=Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")))
+        honeycomb = HoneycombStore(
+            HoneycombConfig(
+                root_dir=honeycomb_root,
+                vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "memory"),
+                vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+                vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
+            )
+        )
+        for line in extracted[:8]:
+            if is_sensitive_memory_content(line):
+                skipped_sensitive += 1
+                continue
+            tier, score = classify_memory_item(line)
+            items.append(CuratedMemoryItem(content=line, tier=tier, score=score))
+            append_daily_memory_note(honeycomb_root, line, source=f"context_curator:{tier}")
+            saved_md += 1
+            if tier in {"profile_fact", "project_preference"} and score >= 0.8:
+                append_durable_memory(honeycomb_root, line, tier=tier)
+                saved_md += 1
+                honeycomb.write_queen_memory(line, source="context_curator", tags=[tier])
+                saved_queen += 1
+                if user_id:
+                    store.append_user_memory_with_metadata(
+                        user_id,
+                        line,
+                        chat_id=chat_id,
+                        tier=tier,
+                        score=score,
+                    )
+                    saved_user += 1
+        return ContextCuratorOutput(
+            saved_user_memories=saved_user,
+            saved_queen_memories=saved_queen,
+            saved_md_entries=saved_md,
+            items=items,
+            notes=f"Context curation completed. skipped_sensitive={skipped_sensitive}",
         ).model_dump(mode="json")
 
 
@@ -412,6 +518,7 @@ class WorkerRuntime:
             ),
             WorkerKind.heavy_compute: HeavyComputeWorker(),
             WorkerKind.audit: AuditWorker(),
+            WorkerKind.context_curator: ContextCuratorWorker(),
             WorkerKind.forged: ForgedWorker(
                 llm_providers=llm_providers,
                 ollama_base_url=ollama_base_url,
@@ -604,5 +711,7 @@ def execute_task_serialized(
         raise ValueError("context_skill_missing_compute_capability")
     if task.worker_kind == WorkerKind.audit and "audit" not in effective_capabilities:
         raise ValueError("context_skill_missing_audit_capability")
+    if task.worker_kind == WorkerKind.context_curator and "memory_curation" not in effective_capabilities:
+        raise ValueError("context_skill_missing_memory_curation_capability")
     result = runtime.run_once(task, context)
     return result.model_dump(mode="json")

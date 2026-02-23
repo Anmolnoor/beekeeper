@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -10,6 +11,7 @@ from uuid import uuid4
 from .contracts import AgentBlueprint
 from .security import append_signed_audit_log
 from .tenancy import HoneycombRecord, HiveRecord, OrganizationRecord, QueenInstanceRecord, UserOrgRole, UserRecord
+from .vector_store import VectorStore, build_vector_store
 
 
 def _utcnow_iso() -> str:
@@ -24,6 +26,11 @@ class BeekeeperStore:
         self.root.mkdir(parents=True, exist_ok=True)
         for scope in ("orgs", "hives", "honeycombs", "queens", "templates", "profiles", "settings", "channels", "channel_pairings", "pairing_pending", "audit", "users", "roles", "chats", "user_memories"):
             (self.root / scope).mkdir(parents=True, exist_ok=True)
+        self.vector_store: VectorStore = build_vector_store(
+            os.getenv("BEEKEEPER_VECTOR_BACKEND", "memory"),
+            collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "beekeeper_user_memory"),
+            url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
+        )
 
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -402,32 +409,170 @@ class BeekeeperStore:
 
     def append_user_memory(self, user_id: str, content: str, chat_id: str | None = None) -> None:
         """Append a memory about the user. Used to personalize responses."""
+        self._append_user_memory_internal(user_id, content, chat_id=chat_id)
+
+    def _memory_ttl_days(self, tier: str | None, score: float | None) -> int:
+        if tier == "profile_fact":
+            ttl = 365
+        elif tier == "project_preference":
+            ttl = 180
+        else:
+            ttl = 30
+        s = float(score or 0.0)
+        if s < 0.75:
+            ttl = min(ttl, 30)
+        if tier == "ephemeral_note":
+            ttl = min(ttl, 14)
+        return max(1, ttl)
+
+    def _parse_iso_dt(self, raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    def _is_memory_expired(self, row: dict[str, Any], now: datetime) -> bool:
+        exp = self._parse_iso_dt(str(row.get("expires_at", "")) or None)
+        if exp is None:
+            return False
+        return exp <= now
+
+    def _cleanup_user_memories_file(self, user_id: str) -> None:
+        path = self.root / "user_memories" / f"{user_id}.jsonl"
+        if not path.exists():
+            return
+        now = datetime.now(timezone.utc)
+        kept: list[dict[str, Any]] = []
+        changed = False
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    changed = True
+                    continue
+                if self._is_memory_expired(row, now):
+                    changed = True
+                    continue
+                kept.append(row)
+        if not changed:
+            return
+        with path.open("w", encoding="utf-8") as f:
+            for row in kept:
+                f.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+    def _append_user_memory_internal(
+        self,
+        user_id: str,
+        content: str,
+        *,
+        chat_id: str | None = None,
+        tier: str | None = None,
+        score: float | None = None,
+    ) -> None:
+        """Append a memory about the user. Used to personalize responses."""
+        clean = content.strip()
+        if not clean:
+            return
+        self._cleanup_user_memories_file(user_id)
         path = self.root / "user_memories" / f"{user_id}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
+        memory_id = f"mem_{uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc)
+        ttl_days = self._memory_ttl_days(tier=tier, score=score)
         row = {
-            "memory_id": f"mem_{uuid4().hex[:12]}",
-            "content": content.strip(),
+            "memory_id": memory_id,
+            "content": clean,
             "chat_id": chat_id,
-            "created_at": _utcnow_iso(),
+            "tier": tier or "project_preference",
+            "score": float(score) if score is not None else None,
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(days=ttl_days)).isoformat(),
         }
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=True) + "\n")
+        self.vector_store.upsert(f"user:{user_id}:{memory_id}", clean)
 
     def list_user_memories(self, user_id: str, limit: int = 25) -> list[dict[str, Any]]:
         """List recent memories for a user, most recent first."""
+        self._cleanup_user_memories_file(user_id)
         path = self.root / "user_memories" / f"{user_id}.jsonl"
         if not path.exists():
             return []
         rows: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
         with path.open("r", encoding="utf-8") as f:
             for line in reversed(f.readlines()):
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if self._is_memory_expired(row, now):
+                    continue
+                rows.append(row)
                 if len(rows) >= limit:
                     break
         return rows
+
+    def append_user_memory_with_metadata(
+        self,
+        user_id: str,
+        content: str,
+        *,
+        chat_id: str | None = None,
+        tier: str | None = None,
+        score: float | None = None,
+    ) -> None:
+        self._append_user_memory_internal(
+            user_id,
+            content,
+            chat_id=chat_id,
+            tier=tier,
+            score=score,
+        )
+
+    def search_user_memories(self, user_id: str, query: str, limit: int = 15) -> list[dict[str, Any]]:
+        """Hybrid-ish retrieval over user memories with keyword and semantic signal."""
+        recent = self.list_user_memories(user_id, limit=max(limit * 3, 40))
+        if not query.strip() or not recent:
+            return recent[:limit]
+        query_l = query.lower()
+        tokens = [t for t in query_l.replace("/", " ").replace("_", " ").split() if len(t) > 2]
+        semantic_hits = self.vector_store.search_with_content(query, limit=max(limit * 2, 12))
+        semantic_texts = {text for _, text in semantic_hits if text}
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for idx, row in enumerate(recent):
+            content = str(row.get("content", "")).strip()
+            if not content:
+                continue
+            lower = content.lower()
+            keyword = float(sum(1 for t in tokens if t in lower))
+            semantic = 1.5 if content in semantic_texts else 0.0
+            recency = max(0.05, 1.0 - (idx * 0.06))
+            score = keyword + semantic + recency
+            if score <= 0:
+                continue
+            scored.append((score, row))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for _, row in scored:
+            key = str(row.get("memory_id", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+            if len(out) >= limit:
+                break
+        return out

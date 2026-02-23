@@ -8,14 +8,21 @@ Use this guide to choose the right configuration for your use case.
 
 | Scheduler | When to Use | Requirements | Command |
 |-----------|-------------|--------------|---------|
+| **auto** | Recommended default. Picks best backend at runtime with fallback. | Optional Redis/Temporal | `beekeeper run --scheduler auto` |
 | **inline** | Local dev, quick tests, single-process runs | None | `beekeeper run --scheduler inline` |
 | **celery** | Production queue: Redis-backed, horizontal scaling | Redis, Celery worker | `beekeeper run --scheduler celery` |
 | **temporal** | Durable workflows, retries, long-running tasks | Temporal server, Temporal worker | `beekeeper run --scheduler temporal` |
 
 **Quick choice:**
-- **Just trying Beekeeper?** → `inline`
-- **Team/production with multiple workers?** → `celery`
-- **Need durable execution and retries?** → `temporal`
+- **Recommended for most users:** `auto`
+- **Just trying Beekeeper with no infra:** `inline`
+- **Team/production with multiple workers:** `celery`
+- **Need durable execution and retries:** `temporal`
+
+**How `auto` decides:**
+- If payload asks for durable/long-running workflow, prefer `temporal` when available.
+- Otherwise prefer `celery` when Redis queue is reachable.
+- Fall back to `inline` if queue backends are unavailable.
 
 ---
 

@@ -70,7 +70,7 @@ What `beekeeper` (no subcommand) does:
 - `beekeeper init-tenant --org <name> --hive <name> [--honeycomb-root .honeycomb]` — Creates org, hive, and honeycomb records in `.beekeeper_store`.
 
 **Running the Queen**
-- `beekeeper run --scheduler <inline|celery|temporal> --vector <memory|qdrant> --query "<text>"` — Runs a single Queen request.
+- `beekeeper run --scheduler <auto|inline|celery|temporal> --vector <memory|qdrant> --query "<text>"` — Runs a single Queen request.
 - `beekeeper chat` — Interactive Queen chat in terminal. Use `--scheduler`, `--vector`, `--intent` to configure.
 - `beekeeper pulse [--interval 2] [--honeycomb-root .honeycomb]` — Runs Pulse tick loop for Queen autonomy (cron jobs, backlog).
 
@@ -110,7 +110,7 @@ What `beekeeper` (no subcommand) does:
 
 ```bash
 beekeeper run \
-  --scheduler <inline|celery|temporal> \
+  --scheduler <auto|inline|celery|temporal> \
   --vector <memory|qdrant> \
   --intent <intent_name> \
   --query "<text>" \
@@ -120,7 +120,7 @@ beekeeper run \
 ```
 
 Notes:
-- `--scheduler` default: `inline`
+- `--scheduler` default: `auto`
 - `--vector` default: `memory`
 - `--intent` default: `research_topic`
 - `--query` and `--payload` are optional (payload is JSON string)
@@ -151,11 +151,11 @@ beekeeper up --with-workers
 # 7) Bring infra + queen-api + Open WebUI for chat
 beekeeper up --with-open-webui
 
-# 8) Run via inline scheduler + memory vector store
-beekeeper run --scheduler inline --vector memory --query "quick local test"
+# 8) Run via auto scheduler + memory vector store
+beekeeper run --scheduler auto --vector memory --query "quick local test"
 
 # 9) Interactive Queen chat
-beekeeper chat --scheduler inline --vector memory
+beekeeper chat --scheduler auto --vector memory
 
 # 10) Run via celery + qdrant
 beekeeper run --scheduler celery --vector qdrant --query "research agent guardrails"

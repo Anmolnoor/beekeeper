@@ -32,7 +32,7 @@ class BeekeeperClient:
     def __init__(
         self,
         honeycomb_root: str | Path = ".honeycomb",
-        scheduler: str = "inline",
+        scheduler: str = "auto",
         vector_backend: str = "memory",
         max_reruns: int = 1,
         **kwargs: Any,

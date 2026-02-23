@@ -16,8 +16,10 @@ Template variables in queen.md: {{intent}}, {{domain}}, {{worker_kind}}
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from .prompt_templates import render_prompt
+from .user_memory import ensure_memory_files, load_markdown_memory_snippets
 
 DEFAULT_QUEEN_CONTEXT = """# Queen Identity & Protocol
 
@@ -124,10 +126,11 @@ def load_queen_context(honeycomb_root: Path) -> str:
             parts.append(content)
 
     # 3. Local honeycomb context
-    local_path = Path(honeycomb_root) / "context" / "queen.md"
-    local_content = _read_file_safe(local_path)
-    if local_content:
-        parts.append(local_content)
+    local_context_dir = Path(honeycomb_root) / "context"
+    for local_name in ("queen.md", "QUEEN_CONTEXT.md", "MEMORY_POLICY.md"):
+        local_content = _read_file_safe(local_context_dir / local_name)
+        if local_content:
+            parts.append(local_content)
 
     # 4. Default if nothing found
     if not parts:
@@ -157,4 +160,57 @@ def ensure_queen_context_file(honeycomb_root: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text(DEFAULT_QUEEN_CONTEXT, encoding="utf-8")
+    alt = Path(honeycomb_root) / "context" / "QUEEN_CONTEXT.md"
+    if not alt.exists():
+        alt.write_text(
+            "# Queen Context Override\n\nAdd project-specific behavior rules here.\n",
+            encoding="utf-8",
+        )
+    ensure_memory_files(honeycomb_root)
     return path
+
+
+def normalize_messages(messages: list[dict[str, Any]], max_messages: int = 24) -> list[dict[str, str]]:
+    """Normalize and trim chat messages while preserving recent context."""
+    normalized: list[dict[str, str]] = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role", "user")).strip() or "user"
+        content = str(m.get("content", "")).strip()
+        if not content:
+            continue
+        normalized.append({"role": role, "content": content[:4000]})
+    if len(normalized) <= max_messages:
+        return normalized
+    return normalized[-max_messages:]
+
+
+def build_context_bundle(
+    *,
+    query: str,
+    payload: dict[str, Any],
+    honeycomb: Any,
+    honeycomb_root: Path,
+) -> dict[str, Any]:
+    """Create one context bundle for direct and delegated execution paths."""
+    messages = normalize_messages(payload.get("messages") or [])
+    user_memories = payload.get("user_memories") or []
+    if not isinstance(user_memories, list):
+        user_memories = []
+    semantic_hits = honeycomb.semantic_search_with_content(query, limit=6) if query else []
+    semantic_text = [text for _, text in semantic_hits if text and text.strip()]
+    md_hits = load_markdown_memory_snippets(honeycomb_root, query, limit=6) if query else []
+    bundle = {
+        "messages": messages,
+        "user_memories": user_memories[:18],
+        "semantic_context": semantic_text[:6],
+        "md_memory_context": md_hits[:6],
+        "diagnostics": {
+            "messages_count": len(messages),
+            "user_memories_count": len(user_memories),
+            "semantic_hits_count": len(semantic_text),
+            "md_hits_count": len(md_hits),
+        },
+    }
+    return bundle

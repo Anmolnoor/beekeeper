@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -133,4 +135,168 @@ def extract_and_save_queen_memories(
         return saved_ids
     except Exception:
         return []
+
+
+def ensure_memory_files(honeycomb_root: str | Path) -> dict[str, Path]:
+    """Ensure markdown memory/config files exist for durable context."""
+    root = Path(honeycomb_root)
+    memory_dir = root / "memory"
+    context_dir = root / "context"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+    memory_path = memory_dir / "MEMORY.md"
+    policy_path = context_dir / "MEMORY_POLICY.md"
+    queen_ctx_path = context_dir / "QUEEN_CONTEXT.md"
+    if not memory_path.exists():
+        memory_path.write_text("# Durable Memory\n\n## Profile Facts\n\n## Project Preferences\n", encoding="utf-8")
+    if not policy_path.exists():
+        policy_path.write_text(
+            (
+                "# Memory Policy\n\n"
+                "Balanced policy:\n"
+                "- Save stable profile facts.\n"
+                "- Save project/tool preferences that affect future responses.\n"
+                "- Keep ephemeral notes in daily logs only.\n"
+            ),
+            encoding="utf-8",
+        )
+    if not queen_ctx_path.exists():
+        queen_ctx_path.write_text(
+            (
+                "# Queen Context Override\n\n"
+                "Use this file for project-specific Queen behavior notes.\n"
+                "This file is appended to Queen context at runtime when present.\n"
+            ),
+            encoding="utf-8",
+        )
+    return {"memory": memory_path, "policy": policy_path, "queen_context": queen_ctx_path}
+
+
+def classify_memory_item(content: str) -> tuple[str, float]:
+    """Heuristic balanced-policy classifier for extracted memory statements."""
+    text = (content or "").strip()
+    lowered = text.lower()
+    if not text:
+        return ("ephemeral_note", 0.0)
+    profile_markers = (
+        "i am ",
+        "my name",
+        "i prefer",
+        "prefer ",
+        "my goal",
+        "i want",
+        "i work",
+        "i use",
+    )
+    project_markers = (
+        "project",
+        "repo",
+        "stack",
+        "typescript",
+        "python",
+        "react",
+        "docker",
+        "queen",
+        "worker",
+        "api",
+    )
+    if any(marker in lowered for marker in profile_markers):
+        return ("profile_fact", 0.9)
+    if any(marker in lowered for marker in project_markers):
+        return ("project_preference", 0.82)
+    if len(text) > 160:
+        return ("ephemeral_note", 0.55)
+    return ("ephemeral_note", 0.65)
+
+
+_SENSITIVE_PATTERNS = (
+    re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),  # email
+    re.compile(r"\b(?:\+?\d[\d\-\s().]{8,}\d)\b"),  # phone-like
+    re.compile(r"\b(?:\d[ -]*?){13,19}\b"),  # possible card number
+    re.compile(r"\b(?:ssn|social security|passport|driver(?:'s)? license)\b", re.IGNORECASE),
+    re.compile(r"\b(?:api[_-]?key|access[_-]?token|secret|password|private[_-]?key|bearer)\b", re.IGNORECASE),
+    re.compile(r"\b(?:sk-[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{20,})\b"),  # common key prefixes
+)
+
+
+def is_sensitive_memory_content(content: str) -> bool:
+    """Return True when text appears to contain secrets/PII that should not be persisted."""
+    text = (content or "").strip()
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _SENSITIVE_PATTERNS)
+
+
+def append_daily_memory_note(honeycomb_root: str | Path, content: str, source: str = "context_curator") -> Path:
+    root = Path(honeycomb_root)
+    ensure_memory_files(root)
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = root / "memory" / f"{day}.md"
+    if not path.exists():
+        path.write_text(f"# Daily Memory {day}\n\n", encoding="utf-8")
+    with path.open("a", encoding="utf-8") as f:
+        f.write(f"- [{source}] {content.strip()}\n")
+    return path
+
+
+def append_durable_memory(honeycomb_root: str | Path, content: str, tier: str) -> Path:
+    root = Path(honeycomb_root)
+    files = ensure_memory_files(root)
+    path = files["memory"]
+    section = "## Profile Facts" if tier == "profile_fact" else "## Project Preferences"
+    body = path.read_text(encoding="utf-8")
+    escaped_section = re.escape(section)
+    if re.search(escaped_section, body) is None:
+        body += f"\n{section}\n"
+    lines = body.splitlines()
+    insert_at = len(lines)
+    for i, line in enumerate(lines):
+        if line.strip() == section:
+            insert_at = i + 1
+            while insert_at < len(lines) and lines[insert_at].strip().startswith("- "):
+                if lines[insert_at].strip() == f"- {content.strip()}":
+                    return path
+                insert_at += 1
+            break
+    lines.insert(insert_at, f"- {content.strip()}")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def load_markdown_memory_snippets(honeycomb_root: str | Path, query: str, limit: int = 8) -> list[str]:
+    """Simple hybrid-ish recall from markdown memory files (keyword + recency)."""
+    root = Path(honeycomb_root)
+    memory_dir = root / "memory"
+    if not memory_dir.exists():
+        return []
+    tokens = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) > 2]
+    scored: list[tuple[float, str]] = []
+    files = sorted(memory_dir.glob("*.md"), reverse=True)
+    for rank, path in enumerate(files):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            content = line[2:] if line.startswith("- ") else line
+            content_l = content.lower()
+            keyword_score = float(sum(1 for t in tokens if t in content_l))
+            if keyword_score <= 0:
+                continue
+            recency_boost = max(0.1, 1.0 - (rank * 0.12))
+            scored.append((keyword_score + recency_boost, content))
+    scored.sort(key=lambda r: r[0], reverse=True)
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, text in scored:
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
 
