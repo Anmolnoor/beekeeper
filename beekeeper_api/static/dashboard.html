@@ -43,6 +43,9 @@
     .service-default { background: var(--border); }
     .logs-toggle { cursor: pointer; user-select: none; }
     .logs-toggle:hover { color: var(--accent); }
+    .small { font-size: 0.75rem; color: var(--muted); }
+    .kv { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.25rem 0; font-size: 0.82rem; border-bottom: 1px solid var(--border); }
+    .kv:last-child { border-bottom: none; }
   </style>
 </head>
 <body>
@@ -85,6 +88,26 @@
         <div class="card">
           <h2>Health</h2>
           <div id="health-status">Checking…</div>
+        </div>
+        <div class="card">
+          <h2>System Overview</h2>
+          <div id="system-overview">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>Workers Registry</h2>
+          <div id="workers-registry">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>Ops Analytics</h2>
+          <div id="ops-analytics">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>Recent Traces</h2>
+          <div id="traces-list">Loading…</div>
+        </div>
+        <div class="card" style="grid-column: 1 / -1">
+          <h2>Queen Updates</h2>
+          <div id="queen-updates-list">Loading…</div>
         </div>
         <div class="card" style="grid-column: 1 / -1">
           <h2>Approvals (HITL)</h2>
@@ -153,6 +176,7 @@
         <h2>Quick links</h2>
         <p style="font-size:0.875rem;color:var(--muted)">
           Chat: <a href="http://localhost:3000" target="_blank" rel="noopener" style="color:var(--accent)">Open WebUI</a> &middot;
+          Activity: <a href="/activity" style="color:var(--accent)">Live Activity</a> &middot;
           CLI: <code>beekeeper channels list</code> &middot;
           <code>beekeeper templates list</code>
         </p>
@@ -184,6 +208,27 @@
       const h = { ...opts.headers };
       if (token()) h['Authorization'] = 'Bearer ' + token();
       return fetch(API + url, { ...opts, headers: h });
+    }
+    async function readErrorDetail(resp) {
+      let detail = '';
+      try {
+        const text = await resp.text();
+        if (!text) return '';
+        try {
+          const parsed = JSON.parse(text);
+          detail = parsed.detail || parsed.message || text;
+        } catch (_) {
+          detail = text;
+        }
+      } catch (_) {}
+      return String(detail || '').trim();
+    }
+    function errHtml(resp, fallback) {
+      if (!resp) return '<div class="error">' + (fallback || 'Failed') + '</div>';
+      const status = Number(resp.status || 0);
+      if (status === 401) return '<div class="error">Unauthorized</div>';
+      if (status === 403) return '<div class="error">Forbidden</div>';
+      return '<div class="error">' + (fallback || 'Request failed') + ' (' + status + ')</div>';
     }
     function showLogin() {
       document.getElementById('login-view').style.display = 'block';
@@ -314,24 +359,32 @@
     });
     document.getElementById('env-llm_provider')?.addEventListener('change', syncEnvProviderFields);
     async function loadCards() {
-      const [chRes, tplRes, orgRes, healthRes, approvalsRes] = await Promise.all([
+      const [chRes, tplRes, orgRes, healthRes, approvalsRes, hivesRes, combsRes, queensRes, chatsRes, workersRes, analyticsRes, tracesRes, updatesRes] = await Promise.all([
         api('/api/channels'),
         api('/api/templates'),
         api('/api/orgs'),
         api('/healthz'),
-        api('/api/approvals')
+        api('/api/approvals'),
+        api('/api/hives'),
+        api('/api/honeycombs'),
+        api('/api/queens'),
+        api('/api/chats?limit=200'),
+        api('/api/workers/registry'),
+        api('/api/analytics/latency'),
+        api('/api/traces?limit=8'),
+        api('/api/queen-updates?limit=8')
       ]);
       document.getElementById('channels-list').innerHTML = chRes.ok
         ? ((await chRes.json()).channels || []).map(c => `<div class="row"><span>${c.channel || '-'}</span><span class="badge">configured</span></div>`).join('') || '<div class="row">No channels</div>'
-        : '<div class="error">Unauthorized</div>';
+        : errHtml(chRes, 'Channels unavailable');
       const tplData = tplRes.ok ? await tplRes.json() : {};
       const templates = tplData.templates || [];
       document.getElementById('templates-list').innerHTML = tplRes.ok
         ? templates.map(t => `<div class="row"><span>${t.name || t.template_id}</span></div>`).join('') || '<div class="row">No templates</div>'
-        : '<div class="error">Unauthorized</div>';
+        : errHtml(tplRes, 'Templates unavailable');
       document.getElementById('orgs-list').innerHTML = orgRes.ok
         ? ((await orgRes.json()).orgs || []).map(o => `<div class="row"><span>${o.name || o.org_id}</span></div>`).join('') || '<div class="row">No orgs</div>'
-        : '<div class="error">Unauthorized</div>';
+        : errHtml(orgRes, 'Organizations unavailable');
       document.getElementById('health-status').innerHTML = healthRes.ok
         ? '<span class="status-ok">OK</span>'
         : '<span class="error">Unhealthy</span>';
@@ -341,7 +394,65 @@
         ? (approvals.length
             ? approvals.map(a => `<div class="row" style="align-items:center;gap:0.5rem"><span>${a.task_id || a.review_id} – ${(a.reason || '').slice(0,40)}</span><span><button onclick="approveReview('${a.review_id}')" style="padding:0.2rem 0.5rem;font-size:0.75rem;background:var(--accent);border:none;border-radius:4px;color:white;cursor:pointer">Approve</button> <button onclick="rejectReview('${a.review_id}')" style="padding:0.2rem 0.5rem;font-size:0.75rem;background:var(--border);border:none;border-radius:4px;color:var(--text);cursor:pointer">Reject</button></span></div>`).join('')
             : '<div class="row">No pending approvals</div>')
-        : '<div class="error">Unauthorized</div>';
+        : errHtml(approvalsRes, 'Approvals unavailable');
+
+      const hives = hivesRes.ok ? ((await hivesRes.json()).hives || []) : [];
+      const honeycombs = combsRes.ok ? ((await combsRes.json()).honeycombs || []) : [];
+      const queens = queensRes.ok ? ((await queensRes.json()).queens || []) : [];
+      const chats = chatsRes.ok ? ((await chatsRes.json()).chats || []) : [];
+      const activeChats = chats.filter(c => (c.messages || []).length > 0).length;
+      document.getElementById('system-overview').innerHTML = (hivesRes.ok && combsRes.ok && queensRes.ok && chatsRes.ok)
+        ? [
+            `<div class="kv"><span>Hives</span><strong>${hives.length}</strong></div>`,
+            `<div class="kv"><span>Honeycombs</span><strong>${honeycombs.length}</strong></div>`,
+            `<div class="kv"><span>Queens</span><strong>${queens.length}</strong></div>`,
+            `<div class="kv"><span>Total Chats</span><strong>${chats.length}</strong></div>`,
+            `<div class="kv"><span>Active Chats</span><strong>${activeChats}</strong></div>`
+          ].join('')
+        : '<div class="error">Overview unavailable</div>';
+
+      const workersData = workersRes.ok ? await workersRes.json() : {};
+      const workers = workersData.workers || [];
+      document.getElementById('workers-registry').innerHTML = workersRes.ok
+        ? (workers.length
+          ? `<div class="small">Default: <strong>${workersData.default_worker || '-'}</strong></div>` +
+            workers.map(w => `<div class="kv"><span>${w.worker_kind || w.kind || 'worker'}</span><span class="badge">${w.enabled === false ? 'disabled' : 'enabled'}</span></div>`).join('')
+          : '<div class="row">No workers found</div>')
+        : errHtml(workersRes, 'Workers unavailable');
+
+      const analytics = analyticsRes.ok ? await analyticsRes.json() : {};
+      const alerts = analytics.alerts || [];
+      const latency = analytics.latency_p95_by_worker || {};
+      const costs = analytics.cost_avg_by_worker || {};
+      const quality = analytics.quality_by_worker || {};
+      const topLatency = Object.entries(latency).sort((a, b) => Number(b[1]) - Number(a[1]))[0];
+      const topCost = Object.entries(costs).sort((a, b) => Number(b[1]) - Number(a[1]))[0];
+      const lowQuality = Object.entries(quality).sort((a, b) => Number(a[1]) - Number(b[1]))[0];
+      document.getElementById('ops-analytics').innerHTML = analyticsRes.ok
+        ? [
+            `<div class="kv"><span>Pending HITL</span><strong>${analytics.pending_human_reviews ?? 0}</strong></div>`,
+            `<div class="kv"><span>Queue Pressure (10m)</span><strong>${analytics.hitl_queue_pressure_10m ?? 0}</strong></div>`,
+            `<div class="kv"><span>Slowest p95</span><strong>${topLatency ? topLatency[0] + ' (' + Math.round(Number(topLatency[1])) + 'ms)' : '-'}</strong></div>`,
+            `<div class="kv"><span>Highest Avg Cost</span><strong>${topCost ? topCost[0] + ' ($' + Number(topCost[1]).toFixed(3) + ')' : '-'}</strong></div>`,
+            `<div class="kv"><span>Lowest Avg Quality</span><strong>${lowQuality ? lowQuality[0] + ' (' + Number(lowQuality[1]).toFixed(2) + ')' : '-'}</strong></div>`,
+            `<div class="small">Alerts: ${alerts.length ? alerts.map(a => a.message || a.kind).slice(0, 2).join(' • ') : 'none'}</div>`
+          ].join('')
+        : errHtml(analyticsRes, 'Analytics unavailable');
+
+      const traces = tracesRes.ok ? ((await tracesRes.json()).traces || []) : [];
+      document.getElementById('traces-list').innerHTML = tracesRes.ok
+        ? (traces.length
+          ? traces.map(t => `<div class="kv"><a href="/trace/${t}" style="color:var(--accent)">${t}</a><span class="small">trace</span></div>`).join('')
+          : '<div class="row">No traces yet</div>')
+        : errHtml(tracesRes, 'Traces unavailable');
+
+      const updates = updatesRes.ok ? ((await updatesRes.json()).updates || []) : [];
+      document.getElementById('queen-updates-list').innerHTML = updatesRes.ok
+        ? (updates.length
+          ? updates.map(u => `<div class="kv"><span>${u.kind || u.update_kind || 'update'}: ${(u.title || u.summary || u.message || u.content || '-').slice(0, 90)}</span><span class="small">${u.at ? new Date(u.at).toLocaleString() : ''}</span></div>`).join('')
+          : '<div class="row">No updates yet</div>')
+        : errHtml(updatesRes, 'Updates unavailable');
+
       loadEnvConfig();
       loadAuditLogs();
     }
@@ -374,7 +485,11 @@
       if (!el) return;
       try {
         const r = await api('/api/audit/logs?limit=20');
-        if (!r.ok) { el.textContent = 'Unauthorized'; return; }
+        if (!r.ok) {
+          const detail = await readErrorDetail(r);
+          el.textContent = 'Failed to load logs (' + r.status + (detail ? ': ' + detail : '') + ')';
+          return;
+        }
         const data = await r.json();
         const logs = data.logs || [];
         if (logs.length === 0) {
@@ -389,8 +504,8 @@
             return `<div class="log-row"><span class="service-badge ${cls}">${svc}</span><span>${time}</span>${src}${trace ? ' ' + trace : ''}</div>`;
           }).join('');
         }
-      } catch (_) {
-        el.textContent = 'Failed to load logs.';
+      } catch (err) {
+        el.textContent = err?.message || 'Failed to load logs.';
       }
     }
     (async function init() {

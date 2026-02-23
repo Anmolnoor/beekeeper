@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Activity - Beekeeper</title>
+  <style>
+    :root { --bg: #0f0f12; --card: #1a1a1f; --border: #2a2a32; --text: #e8e8ed; --muted: #888; --accent: #7c6ef6; --ok: #4ade80; --warn: #f59e0b; --bad: #ef4444; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1.5rem; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 0.75rem; flex-wrap: wrap; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    .back { color: var(--muted); text-decoration: none; font-size: 0.875rem; }
+    .back:hover { color: var(--text); }
+    .controls { display: flex; align-items: center; gap: 0.5rem; }
+    .btn { padding: 0.35rem 0.7rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text); cursor: pointer; font-size: 0.8rem; }
+    .btn.active { background: var(--accent); border-color: var(--accent); color: white; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .card h2 { font-size: 0.9rem; margin-bottom: 0.5rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem; }
+    .stat { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; background: var(--bg); }
+    .stat .label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; }
+    .stat .value { font-size: 1.15rem; font-weight: 600; margin-top: 0.2rem; }
+    .muted { color: var(--muted); font-size: 0.75rem; }
+    .chart-wrap { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 0.6rem; }
+    svg { width: 100%; height: 170px; display: block; }
+    .legend { display: flex; gap: 0.8rem; font-size: 0.72rem; color: var(--muted); margin-bottom: 0.4rem; flex-wrap: wrap; }
+    .chip { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+    .line-primary { stroke: var(--accent); }
+    .line-ok { stroke: var(--ok); }
+    .line-warn { stroke: var(--warn); }
+    .line-bad { stroke: var(--bad); }
+    .footer { color: var(--muted); font-size: 0.75rem; margin-top: 0.5rem; }
+    .error { color: #f87171; font-size: 0.85rem; margin-top: 0.4rem; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <a href="/dashboard" class="back">← Dashboard</a>
+      <h1>Hive Activity</h1>
+    </div>
+    <div class="controls">
+      <button class="btn active" id="btn-1h" onclick="setWindow('1h')">1h</button>
+      <button class="btn" id="btn-24h" onclick="setWindow('24h')">24h</button>
+      <button class="btn" onclick="loadActivity()">Refresh</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Chats</h2>
+    <div class="stats">
+      <div class="stat"><div class="label">Messages</div><div class="value" id="chat-messages">-</div></div>
+      <div class="stat"><div class="label">Active Chats</div><div class="value" id="chat-active">-</div></div>
+      <div class="stat"><div class="label">Running Requests</div><div class="value" id="chat-running">-</div></div>
+    </div>
+    <div class="chart-wrap">
+      <div class="legend"><span class="chip"><span class="dot" style="background:var(--accent)"></span>Messages per bucket</span></div>
+      <svg id="chart-chat" viewBox="0 0 600 170"></svg>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Workers</h2>
+    <div class="stats">
+      <div class="stat"><div class="label">Running Now</div><div class="value" id="workers-running">-</div></div>
+      <div class="stat"><div class="label">Completed</div><div class="value" id="workers-completed">-</div></div>
+      <div class="stat"><div class="label">Failed</div><div class="value" id="workers-failed">-</div></div>
+      <div class="stat"><div class="label">Queued</div><div class="value" id="workers-queued">-</div></div>
+      <div class="stat"><div class="label">Blocked</div><div class="value" id="workers-blocked">-</div></div>
+    </div>
+    <div class="chart-wrap">
+      <div class="legend">
+        <span class="chip"><span class="dot" style="background:var(--warn)"></span>Running</span>
+        <span class="chip"><span class="dot" style="background:var(--ok)"></span>Completed</span>
+        <span class="chip"><span class="dot" style="background:var(--bad)"></span>Failed</span>
+      </div>
+      <svg id="chart-workers" viewBox="0 0 600 170"></svg>
+    </div>
+    <div class="footer" id="workers-by-kind">By worker: -</div>
+  </div>
+
+  <div class="card">
+    <h2>Hive</h2>
+    <div class="stats">
+      <div class="stat"><div class="label">Running Work</div><div class="value" id="hive-running">-</div></div>
+      <div class="stat"><div class="label">Throughput / hour</div><div class="value" id="hive-throughput">-</div></div>
+      <div class="stat"><div class="label">Events in Window</div><div class="value" id="hive-events">-</div></div>
+    </div>
+    <div class="chart-wrap">
+      <div class="legend"><span class="chip"><span class="dot" style="background:var(--accent)"></span>Work events per bucket</span></div>
+      <svg id="chart-hive" viewBox="0 0 600 170"></svg>
+    </div>
+    <div class="footer" id="window-caption">Window: -</div>
+    <div class="error" id="activity-error"></div>
+  </div>
+
+  <script>
+    const API = (() => {
+      const params = new URLSearchParams(window.location.search);
+      const fromUrl = params.get('api') || params.get('api_base');
+      if (fromUrl) return fromUrl.replace(/\/$/, '');
+      if (typeof window !== 'undefined' && window.BEEKEEPER_API_URL) return window.BEEKEEPER_API_URL.replace(/\/$/, '');
+      return '';
+    })();
+    let selectedWindow = '1h';
+    let pollHandle = null;
+
+    function token() { return localStorage.getItem('beekeeper_token'); }
+    function api(url, opts = {}) {
+      const h = { ...opts.headers };
+      if (token()) h['Authorization'] = 'Bearer ' + token();
+      return fetch(API + url, { ...opts, headers: h });
+    }
+    async function readErrorDetail(resp) {
+      let detail = '';
+      try {
+        const text = await resp.text();
+        if (!text) return '';
+        try {
+          const parsed = JSON.parse(text);
+          detail = parsed.detail || parsed.message || text;
+        } catch (_) {
+          detail = text;
+        }
+      } catch (_) {}
+      return String(detail || '').trim();
+    }
+    function setText(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = String(value);
+    }
+    function setWindow(next) {
+      selectedWindow = next === '24h' ? '24h' : '1h';
+      document.getElementById('btn-1h').classList.toggle('active', selectedWindow === '1h');
+      document.getElementById('btn-24h').classList.toggle('active', selectedWindow === '24h');
+      loadActivity();
+    }
+    function linePath(values, width = 600, height = 170, pad = 12) {
+      if (!values || values.length === 0) return '';
+      const maxValue = Math.max(1, ...values);
+      const innerW = width - pad * 2;
+      const innerH = height - pad * 2;
+      return values.map((v, i) => {
+        const x = pad + (values.length <= 1 ? 0 : (i / (values.length - 1)) * innerW);
+        const y = pad + innerH - (Number(v || 0) / maxValue) * innerH;
+        return (i === 0 ? 'M ' : ' L ') + x.toFixed(2) + ' ' + y.toFixed(2);
+      }).join('');
+    }
+    function renderSingleLine(svgId, values, className) {
+      const svg = document.getElementById(svgId);
+      if (!svg) return;
+      const d = linePath(values);
+      svg.innerHTML = d
+        ? '<path d="' + d + '" fill="none" stroke-width="2" class="' + className + '"></path>'
+        : '';
+    }
+    function renderMultiLine(svgId, seriesMap) {
+      const svg = document.getElementById(svgId);
+      if (!svg) return;
+      const keys = Object.keys(seriesMap);
+      if (keys.length === 0) { svg.innerHTML = ''; return; }
+      const merged = [];
+      keys.forEach((k) => { (seriesMap[k] || []).forEach((n) => merged.push(Number(n || 0))); });
+      const maxValue = Math.max(1, ...merged);
+      const width = 600;
+      const height = 170;
+      const pad = 12;
+      const innerW = width - pad * 2;
+      const innerH = height - pad * 2;
+      const build = (values) => values.map((v, i) => {
+        const x = pad + (values.length <= 1 ? 0 : (i / (values.length - 1)) * innerW);
+        const y = pad + innerH - (Number(v || 0) / maxValue) * innerH;
+        return (i === 0 ? 'M ' : ' L ') + x.toFixed(2) + ' ' + y.toFixed(2);
+      }).join('');
+      const colorMap = { running: 'line-warn', completed: 'line-ok', failed: 'line-bad' };
+      svg.innerHTML = keys.map((k) => {
+        const d = build(seriesMap[k] || []);
+        return '<path d="' + d + '" fill="none" stroke-width="2" class="' + (colorMap[k] || 'line-primary') + '"></path>';
+      }).join('');
+    }
+    async function loadActivity() {
+      const errorEl = document.getElementById('activity-error');
+      errorEl.textContent = '';
+      try {
+        const r = await api('/api/activity/series?window=' + encodeURIComponent(selectedWindow));
+        if (r.status === 401) {
+          errorEl.innerHTML = 'Please <a href="/dashboard" style="color:var(--accent)">sign in</a>.';
+          return;
+        }
+        if (!r.ok) {
+          const detail = await readErrorDetail(r);
+          throw new Error('Failed to load activity (' + r.status + (detail ? ': ' + detail : '') + ')');
+        }
+        const data = await r.json();
+        const chat = data.chat || {};
+        const workers = data.workers || {};
+        const hive = data.hive || {};
+        setText('chat-messages', chat.total_messages ?? 0);
+        setText('chat-active', chat.active_chats ?? 0);
+        setText('chat-running', chat.running_requests ?? 0);
+        setText('workers-running', workers.running ?? 0);
+        setText('workers-completed', workers.completed ?? 0);
+        setText('workers-failed', workers.failed ?? 0);
+        setText('workers-queued', workers.queued ?? 0);
+        setText('workers-blocked', workers.blocked ?? 0);
+        setText('hive-running', hive.running_work ?? 0);
+        setText('hive-throughput', hive.throughput_per_hour ?? 0);
+        setText('hive-events', hive.events_in_window ?? 0);
+        setText('window-caption', 'Window: ' + (data.window || selectedWindow) + ' • from ' + (data.from || '-') + ' to ' + (data.to || '-'));
+
+        const byWorker = workers.by_worker || [];
+        if (byWorker.length) {
+          document.getElementById('workers-by-kind').textContent = 'By worker: ' + byWorker.map((w) => {
+            return w.worker_kind + ' (run ' + (w.running || 0) + ', ok ' + (w.completed || 0) + ', fail ' + (w.failed || 0) + ')';
+          }).join(' | ');
+        } else {
+          document.getElementById('workers-by-kind').textContent = 'By worker: no activity in this window';
+        }
+
+        renderSingleLine('chart-chat', (chat.series || []).map((p) => p.count || 0), 'line-primary');
+        renderMultiLine('chart-workers', {
+          running: (workers.series || []).map((p) => p.running || 0),
+          completed: (workers.series || []).map((p) => p.completed || 0),
+          failed: (workers.series || []).map((p) => p.failed || 0),
+        });
+        renderSingleLine('chart-hive', (hive.series || []).map((p) => p.work || 0), 'line-primary');
+      } catch (err) {
+        errorEl.textContent = err.message || String(err);
+      }
+    }
+    loadActivity();
+    pollHandle = setInterval(loadActivity, 10000);
+  </script>
+</body>
+</html>

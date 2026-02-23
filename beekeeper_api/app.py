@@ -79,6 +79,14 @@ def trace_page(trace_id: str):
     return FileResponse(_STATIC_DIR / "trace.html")
 
 
+@app.get("/activity")
+def activity_page():
+    """Activity analytics page with live counters and graphs."""
+    if is_fresh_install():
+        return RedirectResponse(url="/setup", status_code=302)
+    return FileResponse(_STATIC_DIR / "activity.html")
+
+
 app.include_router(router)
 
 

@@ -40,6 +40,10 @@ def load_prompt_template(
     # Built-in defaults
     if template_id == "user_memory_extract":
         return _DEFAULT_USER_MEMORY_EXTRACT.strip()
+    if template_id == "context_curator_extract":
+        return _DEFAULT_CONTEXT_CURATOR_EXTRACT.strip()
+    if template_id == "memory_policy":
+        return _DEFAULT_MEMORY_POLICY.strip()
     if template_id == "queen_system":
         return ""  # Queen uses queen_context, not this
 
@@ -81,3 +85,25 @@ User: {user_msg}
 Assistant: {assistant_reply}
 
 Output ONLY the statements, one per line. No numbering or bullets. If nothing worth remembering, output exactly: NONE"""
+
+
+_DEFAULT_CONTEXT_CURATOR_EXTRACT = """Extract concise memory candidates from this chat turn.
+Label each line as one of:
+- profile_fact
+- project_preference
+- ephemeral_note
+
+Conversation:
+User: {user_msg}
+Assistant: {assistant_reply}
+
+Output format (one per line):
+<tier>|<memory statement>
+
+If there is nothing worth storing, output exactly: NONE"""
+
+
+_DEFAULT_MEMORY_POLICY = """Balanced memory policy:
+- Persist stable profile facts and project preferences.
+- Keep transient information in daily notes only.
+- Avoid storing secrets, private credentials, or highly sensitive personal data."""

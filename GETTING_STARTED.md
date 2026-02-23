@@ -60,6 +60,7 @@ beekeeper run --scheduler inline --vector memory --query "What is 2+2?"
 ```
 
 Uses in-memory vector store and inline execution. Your LLM (Ollama, Gemini, or OpenAI) must be reachable per `.env`.
+For normal usage, prefer `--scheduler auto`.
 
 ---
 
@@ -113,7 +114,7 @@ After setup, you are redirected to the dashboard.
 ### CLI chat (terminal)
 
 ```bash
-beekeeper chat --scheduler inline --vector memory
+beekeeper chat --scheduler auto --vector memory
 ```
 
 ### Web chat (Open WebUI)
@@ -132,7 +133,7 @@ beekeeper chat --scheduler inline --vector memory
 ### Single query
 
 ```bash
-beekeeper run --scheduler inline --vector memory --query "best agent sdk patterns"
+beekeeper run --scheduler auto --vector memory --query "best agent sdk patterns"
 ```
 
 ---

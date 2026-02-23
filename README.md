@@ -12,7 +12,7 @@ beekeeper chat
 Or a single query:
 
 ```bash
-beekeeper run --scheduler inline --vector memory --query "best agent sdk patterns"
+beekeeper run --scheduler auto --vector memory --query "best agent sdk patterns"
 ```
 
 **First-run wizard:** On a fresh install (no `.env`, no store), visit `/` or `/setup` to configure LLM, API keys, and channels. Runs once.

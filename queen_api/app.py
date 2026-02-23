@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -38,7 +39,7 @@ def _get_queen_config() -> QueenConfig:
     honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
     return QueenConfig(
         honeycomb_root=honeycomb_root,
-        scheduler_backend=os.getenv("BEEKEEPER_SCHEDULER_BACKEND", "inline"),
+        scheduler_backend=os.getenv("BEEKEEPER_SCHEDULER_BACKEND", "auto"),
         vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
         vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
         vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
@@ -58,6 +59,39 @@ def _extract_reply(run_output: dict) -> str:
         if v and isinstance(v, dict) and isinstance(v.get("text"), str):
             return str(v.get("text", ""))
     return str(raw_output) if raw_output else "No response."
+
+
+def _enqueue_context_curation(
+    *,
+    query: str,
+    reply: str,
+    user_id: str | None,
+    chat_id: str | None,
+    honeycomb_root: Path,
+) -> None:
+    """Run context curation in a daemon thread so API responses are non-blocking."""
+    if not query.strip() or not reply.strip():
+        return
+
+    def _run() -> None:
+        try:
+            config = _get_queen_config()
+            queen = QueenAgent(config)
+            payload: dict[str, str | bool] = {
+                "user_msg": query[:1200],
+                "assistant_reply": reply[:3000],
+                "honeycomb_root": str(honeycomb_root),
+                "delegate_to_worker": True,
+            }
+            if user_id:
+                payload["user_id"] = user_id
+            if chat_id:
+                payload["chat_id"] = chat_id
+            queen.run(intent="context_curation", payload=payload, source="queen_api:context_curator")
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 class ChatMessage(BaseModel):
@@ -151,7 +185,7 @@ def chat_completions(
         try:
             from beekeeper.store import BeekeeperStore
             store = BeekeeperStore(root=Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")))
-            user_memories = [{"content": m["content"]} for m in store.list_user_memories(user_id)]
+            user_memories = [{"content": m["content"]} for m in store.search_user_memories(user_id, query=query, limit=18)]
         except Exception:
             pass
 
@@ -193,18 +227,14 @@ def chat_completions(
     log_service_call("queen", "completed", source="queen_api", trace_id=result.get("trace_id"))
     reply = _extract_reply(result)
 
-    # Extract and save user memories after reply (when user_id provided)
-    if user_id and query and reply:
-        try:
-            from beekeeper.user_memory import extract_memories
-            from beekeeper.store import BeekeeperStore
-            honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
-            store = BeekeeperStore(root=Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")))
-            chat_id = result.get("trace_id")
-            for mem in extract_memories(query, reply, honeycomb_root=honeycomb_root):
-                store.append_user_memory(user_id, mem, chat_id=chat_id)
-        except Exception:
-            pass
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
+    _enqueue_context_curation(
+        query=query,
+        reply=reply,
+        user_id=user_id,
+        chat_id=result.get("trace_id"),
+        honeycomb_root=honeycomb_root,
+    )
 
     if request.stream:
         return _stream_reply(reply)
