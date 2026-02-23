@@ -46,9 +46,25 @@
     .small { font-size: 0.75rem; color: var(--muted); }
     .kv { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.25rem 0; font-size: 0.82rem; border-bottom: 1px solid var(--border); }
     .kv:last-child { border-bottom: none; }
+    .sr-only { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+    .skip-link { position: absolute; left: 0.5rem; top: -4rem; background: var(--accent); color: #fff; padding: 0.5rem 0.75rem; border-radius: 6px; z-index: 20; }
+    .skip-link:focus { top: 0.5rem; }
+    .toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .toolbar button { padding: 0.4rem 0.7rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text); cursor: pointer; font-size: 0.8rem; }
+    .toolbar button.active { border-color: var(--accent); color: #fff; background: rgba(124,110,246,0.35); }
+    .pill { display: inline-block; padding: 0.15rem 0.45rem; border-radius: 999px; font-size: 0.7rem; border: 1px solid var(--border); color: var(--muted); }
+    .section { scroll-margin-top: 5rem; }
+    textarea { width: 100%; min-height: 120px; padding: 0.55rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
+    .btn { padding: 0.45rem 0.7rem; background: var(--accent); border: none; border-radius: 6px; color: #fff; font-weight: 500; cursor: pointer; font-size: 0.8rem; }
+    .btn.secondary { background: var(--border); color: var(--text); }
+    .inline-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
+    .table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    .table th, .table td { border-bottom: 1px solid var(--border); padding: 0.4rem; text-align: left; vertical-align: top; }
+    .table th { color: var(--muted); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
   </style>
 </head>
 <body>
+  <a href="#dashboard-main" class="skip-link">Skip to dashboard content</a>
   <div id="app">
     <div id="login-view" class="login card" style="display:none">
       <h1>Beekeeper Control</h1>
@@ -72,48 +88,57 @@
         <h1>Beekeeper Control</h1>
         <span class="logout" onclick="logout()">Sign out</span>
       </div>
+      <nav class="toolbar" aria-label="Dashboard sections">
+        <button type="button" data-section-target="overview" onclick="setSectionFilter('overview')">Overview</button>
+        <button type="button" data-section-target="settings" onclick="setSectionFilter('settings')">Settings Studio</button>
+        <button type="button" data-section-target="policy" onclick="setSectionFilter('policy')">Policy Lab</button>
+        <button type="button" data-section-target="ops" onclick="setSectionFilter('ops')">Ops</button>
+        <button type="button" data-section-target="governance" onclick="setSectionFilter('governance')">Governance</button>
+        <button type="button" data-section-target="all" onclick="setSectionFilter('all')">Show All</button>
+      </nav>
+      <main id="dashboard-main">
       <div class="grid">
-        <div class="card">
+        <div class="card section" data-section="overview">
           <h2>Channels</h2>
           <div id="channels-list">Loading…</div>
         </div>
-        <div class="card">
+        <div class="card section" data-section="overview">
           <h2>Templates</h2>
           <div id="templates-list">Loading…</div>
         </div>
-        <div class="card">
+        <div class="card section" data-section="overview">
           <h2>Organizations</h2>
           <div id="orgs-list">Loading…</div>
         </div>
-        <div class="card">
+        <div class="card section" data-section="ops">
           <h2>Health</h2>
           <div id="health-status">Checking…</div>
         </div>
-        <div class="card">
+        <div class="card section" data-section="ops">
           <h2>System Overview</h2>
           <div id="system-overview">Loading…</div>
         </div>
-        <div class="card">
+        <div class="card section" data-section="ops">
           <h2>Workers Registry</h2>
           <div id="workers-registry">Loading…</div>
         </div>
-        <div class="card">
+        <div class="card section" data-section="ops">
           <h2>Ops Analytics</h2>
           <div id="ops-analytics">Loading…</div>
         </div>
-        <div class="card">
+        <div class="card section" data-section="ops">
           <h2>Recent Traces</h2>
           <div id="traces-list">Loading…</div>
         </div>
-        <div class="card" style="grid-column: 1 / -1">
+        <div class="card section" data-section="ops" style="grid-column: 1 / -1">
           <h2>Queen Updates</h2>
           <div id="queen-updates-list">Loading…</div>
         </div>
-        <div class="card" style="grid-column: 1 / -1">
+        <div class="card section" data-section="ops" style="grid-column: 1 / -1">
           <h2>Approvals (HITL)</h2>
           <div id="approvals-list">Loading…</div>
         </div>
-        <div class="card" style="grid-column: 1 / -1">
+        <div class="card section" data-section="settings" style="grid-column: 1 / -1">
           <h2>Environment</h2>
           <p style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">Edit LLM and channel settings. Leave secrets as *** to keep unchanged.</p>
           <div id="env-error" class="error"></div>
@@ -171,6 +196,99 @@
           </form>
           <p style="font-size:0.7rem;color:var(--muted);margin-top:0.5rem">Restart beekeeper-api and queen-api for changes to take effect.</p>
         </div>
+        <div class="card section" data-section="settings">
+          <h2>Settings Catalog</h2>
+          <div id="settings-catalog">Loading…</div>
+        </div>
+        <div class="card section" data-section="settings">
+          <h2>Starter Templates</h2>
+          <div id="settings-templates">Loading…</div>
+        </div>
+        <div class="card section" data-section="settings" style="grid-column:1 / -1">
+          <h2>Config Validator</h2>
+          <p class="small">Paste config JSON to validate before saving.</p>
+          <textarea id="settings-validator-input" aria-label="Config JSON input"></textarea>
+          <div class="inline-actions">
+            <button type="button" class="btn" onclick="runSettingsValidation()">Validate</button>
+            <button type="button" class="btn secondary" onclick="prefillCurrentConfig()">Prefill current config</button>
+          </div>
+          <div id="settings-validator-output" class="small" style="margin-top:0.7rem">No validation run yet.</div>
+        </div>
+        <div class="card section" data-section="settings" style="grid-column:1 / -1">
+          <h2>Effective Config</h2>
+          <div id="effective-config">Loading…</div>
+        </div>
+        <div class="card section" data-section="policy" style="grid-column:1 / -1">
+          <h2>Permission Rule Builder</h2>
+          <p class="small">Define simple allow/deny rules and simulate outcomes.</p>
+          <textarea id="permissions-rules-input" aria-label="Permission rules JSON">[
+  {"action": "allow", "tools": ["read"], "pattern": "**/*.md"},
+  {"action": "deny", "tools": ["read"], "pattern": "**/.env*"}
+]</textarea>
+          <div class="row-fields" style="margin-top:0.6rem">
+            <div>
+              <label>Tool</label>
+              <input type="text" id="permissions-tool" value="read">
+            </div>
+            <div>
+              <label>Sample targets (comma separated)</label>
+              <input type="text" id="permissions-targets" value="README.md,.env,docs/guide.md">
+            </div>
+          </div>
+          <div class="inline-actions">
+            <button type="button" class="btn" onclick="simulatePermissions()">Simulate Rules</button>
+          </div>
+          <div id="permissions-sim-output" class="small" style="margin-top:0.7rem">No simulation run yet.</div>
+        </div>
+        <div class="card section" data-section="ops">
+          <h2>Ops Overview v1</h2>
+          <div id="ops-overview-v1">Loading…</div>
+        </div>
+        <div class="card section" data-section="governance">
+          <h2>KPI Dashboard</h2>
+          <div id="kpi-dashboard">Loading…</div>
+        </div>
+        <div class="card section" data-section="governance">
+          <h2>Staffing Lock</h2>
+          <div id="staffing-lock-card">Loading…</div>
+          <div class="inline-actions">
+            <button type="button" class="btn secondary" onclick="editStaffing()">Edit Staffing JSON</button>
+          </div>
+        </div>
+        <div class="card section" data-section="governance">
+          <h2>API Contract Readiness</h2>
+          <div id="api-contract-readiness-card">Loading…</div>
+          <div class="inline-actions">
+            <button type="button" class="btn secondary" onclick="editContracts()">Edit Contract Status</button>
+          </div>
+        </div>
+        <div class="card section" data-section="governance" style="grid-column:1 / -1">
+          <h2>Usability Test Program</h2>
+          <div id="usability-program-card">Loading…</div>
+          <div class="row-fields" style="margin-top:0.5rem">
+            <div>
+              <label>Sprint</label>
+              <input type="text" id="usability-sprint" placeholder="Sprint 1">
+            </div>
+            <div>
+              <label>Participants</label>
+              <input type="number" id="usability-participants" min="1" value="5">
+            </div>
+          </div>
+          <div class="row-fields">
+            <div>
+              <label>Task success rate (0-1)</label>
+              <input type="number" id="usability-success-rate" min="0" max="1" step="0.01" value="0.8">
+            </div>
+            <div>
+              <label>Notes</label>
+              <input type="text" id="usability-notes" placeholder="Top friction and observations">
+            </div>
+          </div>
+          <div class="inline-actions">
+            <button type="button" class="btn" onclick="logUsabilitySession()">Log Session</button>
+          </div>
+        </div>
       </div>
       <div class="card">
         <h2>Quick links</h2>
@@ -192,6 +310,10 @@
           <div id="live-logs-content">Loading…</div>
         </div>
       </div>
+      <div style="text-align:right;margin-top:0.75rem">
+        <button type="button" class="btn secondary" onclick="window.scrollTo({top:0,behavior:'smooth'})">Back to top</button>
+      </div>
+      </main>
     </div>
   </div>
   <script>
@@ -208,6 +330,37 @@
       const h = { ...opts.headers };
       if (token()) h['Authorization'] = 'Bearer ' + token();
       return fetch(API + url, { ...opts, headers: h });
+    }
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+    function trackEvent(eventName, metadata = {}) {
+      api('/api/analytics/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event: eventName, metadata })
+      }).catch(() => {});
+    }
+    function setSectionFilter(section) {
+      localStorage.setItem('beekeeper_dashboard_section', section);
+      const cards = document.querySelectorAll('[data-section]');
+      cards.forEach(card => {
+        const key = card.getAttribute('data-section');
+        card.style.display = (section === 'all' || key === section) ? '' : 'none';
+      });
+      document.querySelectorAll('[data-section-target]').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-section-target') === section);
+      });
+      trackEvent('section_filter_changed', { section });
+    }
+    function restoreSectionFilter() {
+      const section = localStorage.getItem('beekeeper_dashboard_section') || 'all';
+      setSectionFilter(section);
     }
     async function readErrorDetail(resp) {
       let detail = '';
@@ -295,6 +448,8 @@
       document.getElementById('register-view').style.display = 'none';
       document.getElementById('dashboard-view').style.display = 'block';
       loadCards();
+      restoreSectionFilter();
+      trackEvent('dashboard_loaded');
     }
     async function approveReview(reviewId) {
       const r = await api('/api/approvals/' + reviewId + '/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approver: 'dashboard' }) });
@@ -359,7 +514,7 @@
     });
     document.getElementById('env-llm_provider')?.addEventListener('change', syncEnvProviderFields);
     async function loadCards() {
-      const [chRes, tplRes, orgRes, healthRes, approvalsRes, hivesRes, combsRes, queensRes, chatsRes, workersRes, analyticsRes, tracesRes, updatesRes] = await Promise.all([
+      const [chRes, tplRes, orgRes, healthRes, approvalsRes, hivesRes, combsRes, queensRes, chatsRes, workersRes, analyticsRes, tracesRes, updatesRes, catalogRes, templatesRes, effectiveRes, opsOverviewRes, kpiRes, staffingRes, contractsRes, usabilityRes] = await Promise.all([
         api('/api/channels'),
         api('/api/templates'),
         api('/api/orgs'),
@@ -372,7 +527,15 @@
         api('/api/workers/registry'),
         api('/api/analytics/latency'),
         api('/api/traces?limit=8'),
-        api('/api/queen-updates?limit=8')
+        api('/api/queen-updates?limit=8'),
+        api('/api/settings/catalog'),
+        api('/api/settings/templates'),
+        api('/api/settings/effective'),
+        api('/api/ops/overview'),
+        api('/api/analytics/events/summary?days=14'),
+        api('/api/roadmap/staffing'),
+        api('/api/roadmap/contracts'),
+        api('/api/roadmap/usability')
       ]);
       document.getElementById('channels-list').innerHTML = chRes.ok
         ? ((await chRes.json()).channels || []).map(c => `<div class="row"><span>${c.channel || '-'}</span><span class="badge">configured</span></div>`).join('') || '<div class="row">No channels</div>'
@@ -453,8 +616,232 @@
           : '<div class="row">No updates yet</div>')
         : errHtml(updatesRes, 'Updates unavailable');
 
+      const catalog = catalogRes.ok ? await catalogRes.json() : {};
+      const categories = catalog.catalog || [];
+      document.getElementById('settings-catalog').innerHTML = catalogRes.ok
+        ? (categories.length
+          ? categories.map(cat => {
+              const rows = (cat.fields || []).map(f => `<li><strong>${escapeHtml(f.key)}</strong> <span class="small">(${escapeHtml(f.type)})</span></li>`).join('');
+              return `<div style="margin-bottom:0.5rem"><div class="pill">${escapeHtml(cat.title || cat.category)}</div><ul>${rows}</ul></div>`;
+            }).join('')
+          : '<div class="row">No catalog entries</div>')
+        : errHtml(catalogRes, 'Catalog unavailable');
+
+      const starterTemplates = templatesRes.ok ? await templatesRes.json() : {};
+      const templateItems = starterTemplates.templates || [];
+      document.getElementById('settings-templates').innerHTML = templatesRes.ok
+        ? (templateItems.length
+          ? templateItems.map(t => `<div class="kv"><span><strong>${escapeHtml(t.name)}</strong><br><span class="small">${escapeHtml(t.description || '')}</span></span><button class="btn secondary" onclick="applyStarterTemplate('${escapeHtml(t.template_id)}')">Apply</button></div>`).join('')
+          : '<div class="row">No templates available</div>')
+        : errHtml(templatesRes, 'Templates unavailable');
+
+      const effective = effectiveRes.ok ? await effectiveRes.json() : {};
+      const effectiveFields = effective.fields || {};
+      const effectiveRows = Object.entries(effectiveFields).map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml((v || {}).value)}</td><td>${escapeHtml((v || {}).source)}</td></tr>`).join('');
+      document.getElementById('effective-config').innerHTML = effectiveRes.ok
+        ? `<table class="table"><thead><tr><th>Setting</th><th>Effective Value</th><th>Source</th></tr></thead><tbody>${effectiveRows || '<tr><td colspan="3">No fields</td></tr>'}</tbody></table>`
+        : errHtml(effectiveRes, 'Effective config unavailable');
+
+      const opsOverview = opsOverviewRes.ok ? await opsOverviewRes.json() : {};
+      document.getElementById('ops-overview-v1').innerHTML = opsOverviewRes.ok
+        ? [
+            `<div class="kv"><span>Health</span><strong>${escapeHtml(opsOverview.health || 'unknown')}</strong></div>`,
+            `<div class="kv"><span>Pending Approvals</span><strong>${Number(opsOverview.pending_approvals || 0)}</strong></div>`,
+            `<div class="kv"><span>Queue Pressure (10m)</span><strong>${Number(opsOverview.queue_pressure_10m || 0)}</strong></div>`,
+            `<div class="small">Alerts: ${(opsOverview.alerts || []).map(a => escapeHtml(a.message || a.kind)).slice(0, 2).join(' • ') || 'none'}</div>`
+          ].join('')
+        : errHtml(opsOverviewRes, 'Ops overview unavailable');
+
+      const kpi = kpiRes.ok ? await kpiRes.json() : {};
+      document.getElementById('kpi-dashboard').innerHTML = kpiRes.ok
+        ? [
+            `<div class="kv"><span>Window (days)</span><strong>${Number(kpi.window_days || 14)}</strong></div>`,
+            `<div class="kv"><span>Total Events</span><strong>${Number(kpi.events_total || 0)}</strong></div>`,
+            `<div class="small">Top events: ${(kpi.events_by_name || []).slice(0, 3).map(r => `${escapeHtml(r.event)} (${Number(r.count)})`).join(' • ') || 'none'}</div>`
+          ].join('')
+        : errHtml(kpiRes, 'KPI data unavailable');
+
+      const staffing = staffingRes.ok ? await staffingRes.json() : {};
+      const staffingRows = Object.entries(staffing.staffing || {}).map(([role, owner]) => `<div class="kv"><span>${escapeHtml(role)}</span><strong>${escapeHtml(owner || 'unassigned')}</strong></div>`).join('');
+      document.getElementById('staffing-lock-card').innerHTML = staffingRes.ok
+        ? (staffingRows || '<div class="row">No staffing set</div>')
+        : errHtml(staffingRes, 'Staffing unavailable');
+
+      const contracts = contractsRes.ok ? await contractsRes.json() : {};
+      document.getElementById('api-contract-readiness-card').innerHTML = contractsRes.ok
+        ? ((contracts.contracts || []).map(c => `<div class="kv"><span>${escapeHtml(c.name)}</span><span class="badge">${escapeHtml(c.status || 'pending')}</span></div>`).join('') || '<div class="row">No contract tracking rows</div>')
+        : errHtml(contractsRes, 'Contracts unavailable');
+
+      const usability = usabilityRes.ok ? await usabilityRes.json() : {};
+      document.getElementById('usability-program-card').innerHTML = usabilityRes.ok
+        ? ((usability.sessions || []).slice(-5).reverse().map(s => `<div class="kv"><span>${escapeHtml(s.sprint)} · ${Number(s.participant_count)} users</span><span class="small">${Math.round(Number(s.task_success_rate || 0) * 100)}% success</span></div>`).join('') || '<div class="row">No usability sessions logged</div>')
+        : errHtml(usabilityRes, 'Usability program unavailable');
+
       loadEnvConfig();
       loadAuditLogs();
+    }
+    async function applyStarterTemplate(templateId) {
+      try {
+        const r = await api('/api/settings/templates');
+        if (!r.ok) throw new Error('Cannot load templates');
+        const data = await r.json();
+        const tpl = (data.templates || []).find(t => t.template_id === templateId);
+        if (!tpl) throw new Error('Template not found');
+        const cfg = tpl.config || {};
+        const form = document.getElementById('env-form');
+        if (!form) return;
+        Object.entries(cfg).forEach(([key, val]) => {
+          const field = form.querySelector(`[name="${key}"]`);
+          if (field) field.value = val || '';
+        });
+        syncEnvProviderFields();
+        trackEvent('starter_template_applied', { template_id: templateId });
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    }
+    async function prefillCurrentConfig() {
+      try {
+        const r = await api('/api/settings/effective');
+        if (!r.ok) throw new Error('Cannot load effective config');
+        const data = await r.json();
+        const out = {};
+        Object.entries(data.fields || {}).forEach(([k, v]) => { out[k] = (v || {}).value; });
+        document.getElementById('settings-validator-input').value = JSON.stringify(out, null, 2);
+        trackEvent('validator_prefill_current');
+      } catch (err) {
+        document.getElementById('settings-validator-output').innerHTML = `<span class="error">${escapeHtml(err.message || String(err))}</span>`;
+      }
+    }
+    async function runSettingsValidation() {
+      const output = document.getElementById('settings-validator-output');
+      let parsed;
+      try {
+        parsed = JSON.parse(document.getElementById('settings-validator-input').value || '{}');
+      } catch (err) {
+        output.innerHTML = `<span class="error">Invalid JSON: ${escapeHtml(err.message || String(err))}</span>`;
+        return;
+      }
+      try {
+        const r = await api('/api/settings/validate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ config: parsed })
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || 'Validation request failed');
+        const errors = (data.errors || []).map(e => `<li class="error">${escapeHtml(e)}</li>`).join('');
+        const warnings = (data.warnings || []).map(w => `<li>${escapeHtml(w)}</li>`).join('');
+        output.innerHTML = `<div><strong>${data.ok ? 'Validation passed' : 'Validation failed'}</strong></div><ul>${errors || ''}${warnings || ''}</ul>`;
+        trackEvent('settings_validated', { ok: !!data.ok, errors: (data.errors || []).length });
+      } catch (err) {
+        output.innerHTML = `<span class="error">${escapeHtml(err.message || String(err))}</span>`;
+      }
+    }
+    async function simulatePermissions() {
+      const output = document.getElementById('permissions-sim-output');
+      let rules = [];
+      try {
+        rules = JSON.parse(document.getElementById('permissions-rules-input').value || '[]');
+      } catch (err) {
+        output.innerHTML = `<span class="error">Rules JSON invalid: ${escapeHtml(err.message || String(err))}</span>`;
+        return;
+      }
+      const tool = document.getElementById('permissions-tool').value || 'read';
+      const sampleTargets = (document.getElementById('permissions-targets').value || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      try {
+        const r = await api('/api/settings/permissions/simulate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rules, tool, sample_targets: sampleTargets })
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || 'Simulation failed');
+        const lint = (data.lint || []).map(l => `<li class="error">${escapeHtml(l)}</li>`).join('');
+        const rows = (data.results || []).map(res => `<li>${escapeHtml(res.target)} -> <strong>${escapeHtml(res.decision)}</strong></li>`).join('');
+        output.innerHTML = `<ul>${lint}${rows}</ul>`;
+        trackEvent('permissions_simulated', { rules: rules.length, targets: sampleTargets.length });
+      } catch (err) {
+        output.innerHTML = `<span class="error">${escapeHtml(err.message || String(err))}</span>`;
+      }
+    }
+    async function editStaffing() {
+      try {
+        const r = await api('/api/roadmap/staffing');
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || 'Cannot load staffing');
+        const next = prompt('Edit staffing JSON', JSON.stringify(data.staffing || {}, null, 2));
+        if (next == null) return;
+        const parsed = JSON.parse(next);
+        const save = await api('/api/roadmap/staffing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ staffing: parsed })
+        });
+        if (!save.ok) {
+          const body = await save.json().catch(() => ({}));
+          throw new Error(body.detail || 'Save failed');
+        }
+        trackEvent('staffing_updated');
+        loadCards();
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    }
+    async function editContracts() {
+      try {
+        const r = await api('/api/roadmap/contracts');
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || 'Cannot load contracts');
+        const next = prompt('Edit contracts JSON', JSON.stringify(data.contracts || [], null, 2));
+        if (next == null) return;
+        const parsed = JSON.parse(next);
+        const save = await api('/api/roadmap/contracts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contracts: parsed })
+        });
+        if (!save.ok) {
+          const body = await save.json().catch(() => ({}));
+          throw new Error(body.detail || 'Save failed');
+        }
+        trackEvent('contracts_updated');
+        loadCards();
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    }
+    async function logUsabilitySession() {
+      const sprint = document.getElementById('usability-sprint').value.trim();
+      const participants = Number(document.getElementById('usability-participants').value || 0);
+      const successRate = Number(document.getElementById('usability-success-rate').value || 0);
+      const notes = document.getElementById('usability-notes').value || '';
+      if (!sprint) {
+        alert('Sprint is required.');
+        return;
+      }
+      try {
+        const r = await api('/api/roadmap/usability', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sprint,
+            participant_count: participants,
+            task_success_rate: successRate,
+            notes
+          })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || 'Unable to log usability session');
+        trackEvent('usability_session_logged', { sprint, participants });
+        document.getElementById('usability-notes').value = '';
+        loadCards();
+      } catch (err) {
+        alert(err.message || String(err));
+      }
     }
     let liveLogsPoll = null;
     function toggleLiveLogs() {
@@ -480,6 +867,26 @@
       if (document.querySelector('style')?.textContent?.includes(k)) return k;
       return 'service-default';
     }
+    function escapeAuditText(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+    function summarizeAuditDetails(log) {
+      const parts = [];
+      if (log.resource) parts.push(String(log.resource));
+      if (log.error) parts.push('error: ' + String(log.error));
+      if (log.extra && typeof log.extra === 'object') {
+        for (const [k, v] of Object.entries(log.extra)) {
+          if (v === null || v === undefined) continue;
+          parts.push(k + ': ' + (typeof v === 'object' ? JSON.stringify(v) : String(v)));
+        }
+      }
+      return parts.join(' | ');
+    }
     async function loadAuditLogs() {
       const el = document.getElementById('live-logs-content');
       if (!el) return;
@@ -499,9 +906,14 @@
             const svc = l.service || '-';
             const cls = serviceBadgeClass(svc);
             const time = l.at ? new Date(l.at).toLocaleTimeString() : '-';
-            const src = l.source ? `<span style="color:var(--muted)">${l.source}</span>` : '';
-            const trace = l.trace_id ? `<a href="/trace/${l.trace_id}" style="color:var(--accent);font-size:0.65rem">${l.trace_id.slice(0,12)}…</a>` : '';
-            return `<div class="log-row"><span class="service-badge ${cls}">${svc}</span><span>${time}</span>${src}${trace ? ' ' + trace : ''}</div>`;
+            const outcome = l.outcome || '-';
+            const src = l.source ? `<span style="color:var(--muted)">${escapeAuditText(l.source)}</span>` : '';
+            const details = summarizeAuditDetails(l);
+            const detailsHtml = details
+              ? `<span style="color:var(--muted);font-size:0.7rem" title="${escapeAuditText(details)}">${escapeAuditText(details)}</span>`
+              : '';
+            const trace = l.trace_id ? `<a href="/trace/${encodeURIComponent(l.trace_id)}" style="color:var(--accent);font-size:0.65rem">${escapeAuditText(l.trace_id.slice(0,12))}…</a>` : '';
+            return `<div class="log-row"><span class="service-badge ${cls}">${escapeAuditText(svc)}</span><span>${escapeAuditText(time)}</span><span style="font-size:0.7rem;color:var(--muted)">${escapeAuditText(outcome)}</span>${src}${detailsHtml}${trace ? ' ' + trace : ''}</div>`;
           }).join('');
         }
       } catch (err) {

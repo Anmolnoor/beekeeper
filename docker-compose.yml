@@ -4,6 +4,9 @@ services:
     container_name: beekeeper-redis
     ports:
       - "6379:6379"
+    volumes:
+      - ./runtime/docker-data/redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -23,6 +26,8 @@ services:
     ports:
       - "7233:7233"
       - "8233:8233"
+    volumes:
+      - ./runtime/docker-data/temporal:/var/lib/temporal
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -31,7 +36,7 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - qdrant_data:/qdrant/storage
+      - ./runtime/docker-data/qdrant:/qdrant/storage
 
   searxng:
     image: searxng/searxng:latest
@@ -73,7 +78,7 @@ services:
       BEEKEEPER_TEMPORAL_NAMESPACE: default
       BEEKEEPER_TEMPORAL_TASK_QUEUE: beekeeper-queue
     volumes:
-      - honeycomb_data:/app/runtime/honeycomb
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
     depends_on:
       redis:
         condition: service_healthy
@@ -107,7 +112,7 @@ services:
       BEEKEEPER_TEMPORAL_NAMESPACE: default
       BEEKEEPER_TEMPORAL_TASK_QUEUE: beekeeper-queue
     volumes:
-      - honeycomb_data:/app/runtime/honeycomb
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
     depends_on:
       temporal:
         condition: service_started
@@ -132,7 +137,7 @@ services:
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
       BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
     volumes:
-      - honeycomb_data:/app/runtime/honeycomb
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
     depends_on:
       redis:
         condition: service_healthy
@@ -163,7 +168,7 @@ services:
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
       BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
     volumes:
-      - honeycomb_data:/app/runtime/honeycomb
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -200,8 +205,8 @@ services:
       BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
       BEEKEEPER_BASE_URL: http://localhost:8787
     volumes:
-      - honeycomb_data:/app/runtime/honeycomb
-      - beekeeper_store_data:/app/runtime/store
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
+      - ./runtime/docker-data/store:/app/runtime/store
       # Uncomment to persist dashboard env edits to host .env (ensure .env exists first: cp .env.example .env)
       # - ./.env:/app/.env
     extra_hosts:
@@ -221,14 +226,9 @@ services:
       OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       OPENAI_API_BASE_URL: http://queen-api:8788/v1
     volumes:
-      - open_webui_data:/app/backend/data
+      - ./runtime/docker-data/open-webui:/app/backend/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - queen-api
 
-volumes:
-  qdrant_data:
-  honeycomb_data:
-  open_webui_data:
-  beekeeper_store_data:

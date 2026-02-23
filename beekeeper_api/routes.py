@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import hmac
 import json
 import queue
 import threading
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -220,6 +222,233 @@ class SendMessageRequest(BaseModel):
 class UpdateChatRequest(BaseModel):
     title: str | None = None
     pinned: bool | None = None
+
+
+class SettingsValidationRequest(BaseModel):
+    config: dict[str, Any]
+
+
+class PermissionSimulationRequest(BaseModel):
+    rules: list[dict[str, Any]] = Field(default_factory=list)
+    tool: str = "read"
+    target: str = ""
+    sample_targets: list[str] = Field(default_factory=list)
+
+
+class AnalyticsEventRequest(BaseModel):
+    event: str = Field(min_length=1, max_length=120)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StaffingUpdateRequest(BaseModel):
+    staffing: dict[str, Any]
+
+
+class ContractReadinessUpdateRequest(BaseModel):
+    contracts: list[dict[str, Any]]
+
+
+class UsabilitySessionRequest(BaseModel):
+    sprint: str
+    participant_count: int = Field(ge=1, le=1000)
+    task_success_rate: float = Field(ge=0.0, le=1.0)
+    notes: str = ""
+
+
+def _settings_scopes() -> list[dict[str, str]]:
+    return [
+        {"scope": "managed", "priority": "highest", "description": "Org-enforced configuration policy."},
+        {"scope": "cli", "priority": "high", "description": "Runtime override via CLI flags."},
+        {"scope": "local", "priority": "high", "description": "Machine-local non-committed settings."},
+        {"scope": "project", "priority": "medium", "description": "Project-level shared settings."},
+        {"scope": "user", "priority": "low", "description": "Personal defaults."},
+    ]
+
+
+def _settings_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "category": "model_runtime",
+            "title": "Model and Runtime",
+            "fields": [
+                {"key": "llm_provider", "type": "enum", "options": ["ollama", "gemini", "openai"], "required": True},
+                {"key": "ollama_base_url", "type": "string", "required": False},
+                {"key": "ollama_model", "type": "string", "required": False},
+                {"key": "llm_model", "type": "string", "required": False},
+            ],
+        },
+        {
+            "category": "api_keys",
+            "title": "Provider and Channel Secrets",
+            "fields": [
+                {"key": "gemini_api_key", "type": "secret", "required": False},
+                {"key": "openai_api_key", "type": "secret", "required": False},
+                {"key": "telegram_bot_token", "type": "secret", "required": False},
+                {"key": "whatsapp_access_token", "type": "secret", "required": False},
+                {"key": "whatsapp_phone_number_id", "type": "string", "required": False},
+            ],
+        },
+        {
+            "category": "policy",
+            "title": "Policy and Permissions",
+            "fields": [
+                {"key": "permission_rules", "type": "json", "required": False},
+                {"key": "sandbox_mode", "type": "enum", "options": ["standard", "strict"], "required": False},
+            ],
+        },
+        {
+            "category": "governance",
+            "title": "Governance and Rollout",
+            "fields": [
+                {"key": "dashboard_staffing", "type": "json", "required": False},
+                {"key": "dashboard_api_contracts", "type": "json", "required": False},
+                {"key": "dashboard_usability_sessions", "type": "json", "required": False},
+            ],
+        },
+    ]
+
+
+def _settings_templates() -> list[dict[str, Any]]:
+    return [
+        {
+            "template_id": "secure-enterprise",
+            "name": "Secure Enterprise",
+            "description": "OpenAI + strict policy posture with explicit channel setup.",
+            "config": {
+                "llm_provider": "openai",
+                "ollama_base_url": "http://localhost:11434",
+                "ollama_model": "catsarethebest/qwen2.5-N2:1.5b",
+                "gemini_api_key": "",
+                "openai_api_key": "",
+                "telegram_bot_token": "",
+                "whatsapp_access_token": "",
+                "whatsapp_phone_number_id": "",
+            },
+        },
+        {
+            "template_id": "team-collaboration",
+            "name": "Team Collaboration",
+            "description": "Gemini defaults with channel-first onboarding.",
+            "config": {
+                "llm_provider": "gemini",
+                "ollama_base_url": "http://localhost:11434",
+                "ollama_model": "catsarethebest/qwen2.5-N2:1.5b",
+                "gemini_api_key": "",
+                "openai_api_key": "",
+                "telegram_bot_token": "",
+                "whatsapp_access_token": "",
+                "whatsapp_phone_number_id": "",
+            },
+        },
+        {
+            "template_id": "solo-fast",
+            "name": "Solo Fast Local",
+            "description": "Ollama-first local defaults for quick setup.",
+            "config": {
+                "llm_provider": "ollama",
+                "ollama_base_url": "http://localhost:11434",
+                "ollama_model": "catsarethebest/qwen2.5-N2:1.5b",
+                "gemini_api_key": "",
+                "openai_api_key": "",
+                "telegram_bot_token": "",
+                "whatsapp_access_token": "",
+                "whatsapp_phone_number_id": "",
+            },
+        },
+    ]
+
+
+def _validate_settings_payload(config: dict[str, Any]) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    provider = str(config.get("llm_provider", "")).strip().lower()
+    if provider not in {"ollama", "gemini", "openai"}:
+        errors.append("llm_provider must be one of: ollama, gemini, openai.")
+
+    if provider == "ollama":
+        if not str(config.get("ollama_base_url", "")).strip():
+            errors.append("ollama_base_url is required when llm_provider=ollama.")
+        if not str(config.get("ollama_model", "")).strip():
+            errors.append("ollama_model is required when llm_provider=ollama.")
+    if provider == "gemini" and not str(config.get("gemini_api_key", "")).strip():
+        warnings.append("gemini_api_key is empty; Gemini requests will fail until set.")
+    if provider == "openai" and not str(config.get("openai_api_key", "")).strip():
+        warnings.append("openai_api_key is empty; OpenAI requests will fail until set.")
+
+    wa_token = str(config.get("whatsapp_access_token", "")).strip()
+    wa_phone = str(config.get("whatsapp_phone_number_id", "")).strip()
+    if wa_token and not wa_phone:
+        warnings.append("whatsapp_phone_number_id should be set when whatsapp_access_token is configured.")
+
+    for secret_key in ("gemini_api_key", "openai_api_key", "telegram_bot_token", "whatsapp_access_token"):
+        if str(config.get(secret_key, "")).strip().lower() in {"todo", "changeme", "replace-me"}:
+            errors.append(f"{secret_key} uses a placeholder value; provide a real secret.")
+
+    return errors, warnings
+
+
+def _effective_settings(honeycomb_root: str = ".honeycomb") -> dict[str, Any]:
+    store = get_store()
+    env_cfg = _get_setup_config(mask_secrets=True)
+    global_llm_model = store.resolve_llm_model(honeycomb_root=honeycomb_root)
+    settings_list = store.list_settings()
+    settings_map = {row.get("key"): row.get("value") for row in settings_list if row.get("key")}
+    effective_fields = {
+        "llm_provider": {"value": env_cfg.get("llm_provider", "ollama"), "source": "env"},
+        "ollama_base_url": {"value": env_cfg.get("ollama_base_url", "http://localhost:11434"), "source": "env"},
+        "ollama_model": {"value": env_cfg.get("ollama_model", ""), "source": "env"},
+        "gemini_api_key": {"value": env_cfg.get("gemini_api_key", ""), "source": "env"},
+        "openai_api_key": {"value": env_cfg.get("openai_api_key", ""), "source": "env"},
+        "telegram_bot_token": {"value": env_cfg.get("telegram_bot_token", ""), "source": "channel_store"},
+        "whatsapp_access_token": {"value": env_cfg.get("whatsapp_access_token", ""), "source": "env/channel_store"},
+        "whatsapp_phone_number_id": {"value": env_cfg.get("whatsapp_phone_number_id", ""), "source": "env/channel_store"},
+        "llm_model": {"value": global_llm_model or "", "source": "hive_or_global_setting"},
+    }
+    if "permission_rules" in settings_map:
+        effective_fields["permission_rules"] = {"value": settings_map.get("permission_rules"), "source": "global_setting"}
+    return {
+        "scopes": _settings_scopes(),
+        "fields": effective_fields,
+        "last_updated_at": max((str(s.get("updated_at", "")) for s in settings_list), default=""),
+    }
+
+
+def _permission_rule_match(rule: dict[str, Any], tool: str, target: str) -> bool:
+    tools = rule.get("tools", ["*"])
+    if isinstance(tools, str):
+        tools = [tools]
+    if not any(fnmatch.fnmatch(tool, str(pat)) for pat in tools):
+        return False
+    pattern = str(rule.get("pattern", "*"))
+    if not target:
+        return True
+    return fnmatch.fnmatch(target, pattern)
+
+
+def _permission_simulate(
+    rules: list[dict[str, Any]],
+    tool: str,
+    targets: list[str],
+) -> dict[str, Any]:
+    lint: list[str] = []
+    for idx, rule in enumerate(rules):
+        action = str(rule.get("action", "")).lower()
+        if action not in {"allow", "deny"}:
+            lint.append(f"Rule {idx + 1}: action must be allow|deny.")
+        if "pattern" not in rule:
+            lint.append(f"Rule {idx + 1}: missing pattern.")
+    results: list[dict[str, Any]] = []
+    for target in targets:
+        decision = "deny"
+        matched_rule: dict[str, Any] | None = None
+        for rule in rules:
+            if _permission_rule_match(rule, tool=tool, target=target):
+                matched_rule = rule
+                decision = str(rule.get("action", "deny")).lower()
+                break
+        results.append({"target": target, "decision": decision, "matched_rule": matched_rule})
+    return {"lint": lint, "results": results}
 
 
 def _queen_from_request(body: RunChatRequest) -> QueenAgent:
@@ -712,6 +941,42 @@ def list_settings(user: Annotated[UserRecord, Depends(get_current_user)]) -> dic
     return {"settings": store.list_settings()}
 
 
+@router.get("/api/settings/catalog")
+def settings_catalog(user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    return {"catalog": _settings_catalog(), "scopes": _settings_scopes()}
+
+
+@router.get("/api/settings/templates")
+def settings_templates(user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    return {"templates": _settings_templates()}
+
+
+@router.post("/api/settings/validate")
+def settings_validate(
+    body: SettingsValidationRequest,
+    user: Annotated[UserRecord, Depends(get_current_user)],
+) -> dict[str, Any]:
+    errors, warnings = _validate_settings_payload(body.config)
+    return {"ok": len(errors) == 0, "errors": errors, "warnings": warnings}
+
+
+@router.get("/api/settings/effective")
+def settings_effective(
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    return _effective_settings(honeycomb_root=honeycomb_root)
+
+
+@router.post("/api/settings/permissions/simulate")
+def settings_permissions_simulate(
+    body: PermissionSimulationRequest,
+    user: Annotated[UserRecord, Depends(get_current_user)],
+) -> dict[str, Any]:
+    targets = body.sample_targets or [body.target or ""]
+    return _permission_simulate(body.rules, tool=body.tool, targets=targets)
+
+
 @router.post("/api/settings/{key}")
 def write_setting(key: str, payload: dict[str, Any], user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
     store = get_store()
@@ -1156,10 +1421,23 @@ def slack_oauth_callback(
 
 @router.post("/api/chat/run")
 def run_chat(body: RunChatRequest, user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
-    log_service_call("beekeeper_api", "called", source="beekeeper_api:chat_run")
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:chat_run",
+        user_id=user.user_id,
+        resource="chat:run",
+    )
     queen = _queen_from_request(body)
     result = queen.run(intent=body.intent, payload=body.payload, source="beekeeper_api:chat_run")
-    log_service_call("queen", "completed", source="beekeeper_api:chat_run", trace_id=result.get("trace_id"))
+    log_service_call(
+        "queen",
+        "completed",
+        source="beekeeper_api:chat_run",
+        user_id=user.user_id,
+        resource="chat:run",
+        trace_id=result.get("trace_id"),
+    )
     return result
 
 
@@ -1221,7 +1499,13 @@ def send_chat_message(
     store.append_chat_message(chat_id, "user", content)
     memories = [{"content": m["content"]} for m in store.search_user_memories(user.user_id, query=content, limit=18)]
     payload = {"query": content, "messages": prior, "user_memories": memories, "delegate_to_worker": True, "use_web_search": True}
-    log_service_call("beekeeper_api", "called", source="web_ui")
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="web_ui",
+        user_id=user.user_id,
+        resource="chat:message",
+    )
     queen = QueenAgent(
         QueenConfig(
             honeycomb_root=Path(body.honeycomb_root),
@@ -1230,7 +1514,14 @@ def send_chat_message(
         )
     )
     result = queen.run(intent=body.intent, payload=payload, source="web_ui")
-    log_service_call("queen", "completed", source="web_ui", trace_id=result.get("trace_id"))
+    log_service_call(
+        "queen",
+        "completed",
+        source="web_ui",
+        user_id=user.user_id,
+        resource="chat:message",
+        trace_id=result.get("trace_id"),
+    )
     results = result.get("results", [])
     raw_output = results[0].get("output", {}) if results else {}
     reply = ""
@@ -1281,7 +1572,13 @@ async def send_chat_message_stream(
     result_holder: list[dict[str, Any]] = []
 
     def _run() -> None:
-        log_service_call("beekeeper_api", "called", source="web_ui")
+        log_service_call(
+            "beekeeper_api",
+            "called",
+            source="web_ui",
+            user_id=user.user_id,
+            resource="chat:message_stream",
+        )
         queen = QueenAgent(
             QueenConfig(
                 honeycomb_root=Path(body.honeycomb_root),
@@ -1294,7 +1591,14 @@ async def send_chat_message_stream(
             status_queue.put(msg)
 
         result = queen.run(intent=body.intent, payload=payload, status_callback=on_status, source="web_ui")
-        log_service_call("queen", "completed", source="web_ui", trace_id=result.get("trace_id"))
+        log_service_call(
+            "queen",
+            "completed",
+            source="web_ui",
+            user_id=user.user_id,
+            resource="chat:message_stream",
+            trace_id=result.get("trace_id"),
+        )
         status_queue.put(None)  # sentinel
         results = result.get("results", [])
         raw_output = results[0].get("output", {}) if results else {}
@@ -1373,12 +1677,25 @@ def delete_chat(
 
 @router.post("/api/chat/channel")
 def run_channel_chat(body: ChannelRunRequest, user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
-    log_service_call("beekeeper_api", "called", source=f"beekeeper_api:channel:{body.channel}")
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source=f"beekeeper_api:channel:{body.channel}",
+        user_id=user.user_id,
+        resource=f"channel:{body.channel}",
+    )
     queen = QueenAgent(QueenConfig(honeycomb_root=Path(body.honeycomb_root)))
     hub = ChatHub(queen)
     result = hub.dispatch(body.channel, body.payload, intent=body.intent, source=f"channel:{body.channel}")
     trace_id = result.get("response", {}).get("trace_id") if isinstance(result.get("response"), dict) else None
-    log_service_call("queen", "completed", source=f"channel:{body.channel}", trace_id=trace_id)
+    log_service_call(
+        "queen",
+        "completed",
+        source=f"channel:{body.channel}",
+        user_id=user.user_id,
+        resource=f"channel:{body.channel}",
+        trace_id=trace_id,
+    )
     return result
 
 
@@ -1451,6 +1768,186 @@ def get_analytics_latency(
 ) -> dict[str, Any]:
     honeycomb = get_honeycomb(honeycomb_root)
     return compute_ops_metrics(honeycomb.root_dir)
+
+
+@router.get("/api/ops/overview")
+def get_ops_overview(
+    honeycomb_root: str = ".honeycomb",
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    honeycomb = get_honeycomb(honeycomb_root)
+    metrics = compute_ops_metrics(honeycomb.root_dir)
+    pending = honeycomb.list_pending_reviews()
+    audit_file = honeycomb.root_dir / "audit" / f"{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
+    logs: list[dict[str, Any]] = []
+    if audit_file.exists():
+        try:
+            with audit_file.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        logs.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            logs = logs[-12:]
+        except OSError:
+            logs = []
+    alerts = metrics.get("alerts", [])
+    return {
+        "health": "ok",
+        "pending_approvals": len(pending),
+        "queue_pressure_10m": metrics.get("hitl_queue_pressure_10m", 0),
+        "pending_human_reviews": metrics.get("pending_human_reviews", 0),
+        "top_latency_worker": sorted(
+            (metrics.get("latency_p95_by_worker") or {}).items(),
+            key=lambda pair: float(pair[1]),
+            reverse=True,
+        )[:1],
+        "top_cost_worker": sorted(
+            (metrics.get("cost_avg_by_worker") or {}).items(),
+            key=lambda pair: float(pair[1]),
+            reverse=True,
+        )[:1],
+        "alerts": alerts,
+        "recent_logs": logs,
+    }
+
+
+@router.post("/api/analytics/events")
+def track_analytics_event(
+    body: AnalyticsEventRequest,
+    user: Annotated[UserRecord, Depends(get_current_user)],
+) -> dict[str, Any]:
+    store = get_store()
+    existing = store.read_setting("dashboard_analytics_events", default=[])
+    if not isinstance(existing, list):
+        existing = []
+    existing.append(
+        {
+            "event": body.event,
+            "metadata": body.metadata,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "user_id": user.user_id,
+        }
+    )
+    if len(existing) > 1000:
+        existing = existing[-1000:]
+    store.write_setting("dashboard_analytics_events", existing)
+    return {"ok": True}
+
+
+@router.get("/api/analytics/events/summary")
+def get_analytics_events_summary(
+    days: int = Query(14, ge=1, le=180),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    store = get_store()
+    rows = store.read_setting("dashboard_analytics_events", default=[])
+    if not isinstance(rows, list):
+        rows = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    filtered = []
+    for row in rows:
+        at = _parse_iso_dt(str(row.get("at", "")))
+        if at and at >= cutoff:
+            filtered.append(row)
+    counter = Counter(str(r.get("event", "unknown")) for r in filtered)
+    latest = max((str(r.get("at", "")) for r in filtered), default="")
+    return {
+        "window_days": days,
+        "events_total": len(filtered),
+        "events_by_name": [{"event": k, "count": v} for k, v in sorted(counter.items(), key=lambda x: x[1], reverse=True)],
+        "latest_event_at": latest,
+    }
+
+
+def _default_staffing() -> dict[str, Any]:
+    return {
+        "product_manager": "unassigned",
+        "designer": "unassigned",
+        "frontend_engineer_1": "unassigned",
+        "frontend_engineer_2": "unassigned",
+        "backend_engineer": "unassigned",
+        "qa_automation_engineer": "unassigned",
+    }
+
+
+@router.get("/api/roadmap/staffing")
+def roadmap_staffing(user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    store = get_store()
+    staffing = store.read_setting("dashboard_staffing", default=_default_staffing())
+    return {"staffing": staffing}
+
+
+@router.post("/api/roadmap/staffing")
+def update_roadmap_staffing(
+    body: StaffingUpdateRequest,
+    user: Annotated[UserRecord, Depends(get_current_user)],
+) -> dict[str, Any]:
+    store = get_store()
+    store.write_setting("dashboard_staffing", body.staffing)
+    return {"ok": True}
+
+
+def _default_contracts() -> list[dict[str, Any]]:
+    return [
+        {"name": "settings_validation_api", "required_by_sprint": 2, "status": "pending", "owner": "backend"},
+        {"name": "settings_precedence_api", "required_by_sprint": 3, "status": "pending", "owner": "backend"},
+        {"name": "permissions_simulation_api", "required_by_sprint": 4, "status": "pending", "owner": "backend"},
+        {"name": "ops_logs_sessions_api", "required_by_sprint": 5, "status": "pending", "owner": "backend"},
+    ]
+
+
+@router.get("/api/roadmap/contracts")
+def roadmap_contracts(user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    store = get_store()
+    contracts = store.read_setting("dashboard_api_contracts", default=_default_contracts())
+    return {"contracts": contracts}
+
+
+@router.post("/api/roadmap/contracts")
+def update_roadmap_contracts(
+    body: ContractReadinessUpdateRequest,
+    user: Annotated[UserRecord, Depends(get_current_user)],
+) -> dict[str, Any]:
+    store = get_store()
+    store.write_setting("dashboard_api_contracts", body.contracts)
+    return {"ok": True}
+
+
+@router.get("/api/roadmap/usability")
+def roadmap_usability(user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    store = get_store()
+    sessions = store.read_setting("dashboard_usability_sessions", default=[])
+    if not isinstance(sessions, list):
+        sessions = []
+    return {"sessions": sessions}
+
+
+@router.post("/api/roadmap/usability")
+def log_roadmap_usability(
+    body: UsabilitySessionRequest,
+    user: Annotated[UserRecord, Depends(get_current_user)],
+) -> dict[str, Any]:
+    store = get_store()
+    sessions = store.read_setting("dashboard_usability_sessions", default=[])
+    if not isinstance(sessions, list):
+        sessions = []
+    sessions.append(
+        {
+            "sprint": body.sprint,
+            "participant_count": body.participant_count,
+            "task_success_rate": body.task_success_rate,
+            "notes": body.notes,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "by": user.email,
+        }
+    )
+    sessions = sessions[-200:]
+    store.write_setting("dashboard_usability_sessions", sessions)
+    return {"ok": True, "count": len(sessions)}
 
 
 @router.get("/api/activity/series")
@@ -1635,6 +2132,7 @@ def get_audit_logs(
     limit: int = Query(100, ge=1, le=500),
     since: str | None = Query(None, description="ISO8601 timestamp; only return logs after this time"),
     service: str | None = Query(None, description="Filter by service (redis, queen, qdrant, etc.)"),
+    action: str | None = Query(None, description="Filter by action (called, submitted, completed, failed)"),
     source: str | None = Query(None, description="Filter by source (queen_api, web_ui, etc.)"),
     honeycomb_root: str = Query(".honeycomb"),
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
@@ -1683,6 +2181,8 @@ def get_audit_logs(
                             except ValueError:
                                 pass
                         if service and row.get("service") != service:
+                            continue
+                        if action and row.get("action") != action:
                             continue
                         if source and row.get("source") != source:
                             continue
