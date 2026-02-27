@@ -66,6 +66,38 @@ def _parse_iso_dt(raw: str | None) -> datetime | None:
         return None
 
 
+def _extract_reply_text(raw_output: Any, *, empty_fallback: str = "No response.") -> str:
+    """Extract user-facing assistant text from mixed worker output shapes."""
+    if isinstance(raw_output, str):
+        text = raw_output.strip()
+        return text or empty_fallback
+    if not isinstance(raw_output, dict):
+        return empty_fallback
+    for key in ("assistant_reply", "answer", "response", "content", "output", "summary", "text"):
+        value = raw_output.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, dict):
+            nested_text = value.get("text")
+            if isinstance(nested_text, str) and nested_text.strip():
+                return nested_text
+    synthesis = raw_output.get("synthesis")
+    if isinstance(synthesis, str) and synthesis.strip():
+        return synthesis
+    return empty_fallback
+
+
+def _extract_reply_from_results(results: Any, *, empty_fallback: str = "No response.") -> str:
+    if isinstance(results, list) and results and isinstance(results[0], dict):
+        return _extract_reply_text(results[0].get("output"), empty_fallback=empty_fallback)
+    return empty_fallback
+
+
+def _short_error(exc: Exception) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return text[:240]
+
+
 def _activity_window(window: str) -> tuple[datetime, datetime, int, int]:
     now = datetime.now(timezone.utc)
     if window == "24h":
@@ -198,6 +230,7 @@ class RunChatRequest(BaseModel):
     honeycomb_root: str = ".honeycomb"
     scheduler: str = "auto"
     vector: str = "memory"
+    execution_mode: str = "legacy_worker"  # legacy_worker | model_tools | hybrid
 
 
 class ChannelRunRequest(BaseModel):
@@ -217,6 +250,7 @@ class SendMessageRequest(BaseModel):
     intent: str = "research_topic"
     scheduler: str = "auto"
     vector: str = "memory"
+    execution_mode: str = "legacy_worker"  # legacy_worker | model_tools | hybrid
 
 
 class UpdateChatRequest(BaseModel):
@@ -452,10 +486,14 @@ def _permission_simulate(
 
 
 def _queen_from_request(body: RunChatRequest) -> QueenAgent:
+    mode = body.execution_mode if getattr(body, "execution_mode", None) else "legacy_worker"
+    if mode not in ("legacy_worker", "model_tools", "hybrid"):
+        mode = "legacy_worker"
     cfg = QueenConfig(
         honeycomb_root=Path(body.honeycomb_root),
         scheduler_backend=body.scheduler,
         vector_backend=body.vector,
+        execution_mode=mode,
     )
     return QueenAgent(cfg)
 
@@ -1123,11 +1161,7 @@ async def channel_webhook(channel: str, request: Request):
                 if bot_token:
                     resp = result.get("response", {})
                     results = resp.get("results", [])
-                    reply = ""
-                    if results and results[0].get("output"):
-                        reply = str(results[0]["output"])
-                    if not reply:
-                        reply = "Request processed."
+                    reply = _extract_reply_from_results(results, empty_fallback="Request processed.")
                     try:
                         from slack_sdk import WebClient
                         client = WebClient(token=bot_token)
@@ -1210,7 +1244,7 @@ async def channel_webhook(channel: str, request: Request):
                 if bot_token:
                     resp = result.get("response", {})
                     results = resp.get("results", [])
-                    reply = str(results[0]["output"]) if results and results[0].get("output") else "Request processed."
+                    reply = _extract_reply_from_results(results, empty_fallback="Request processed.")
                     try:
                         import urllib.request
                         import urllib.parse
@@ -1267,7 +1301,7 @@ async def channel_webhook(channel: str, request: Request):
             )
             resp = result.get("response", {})
             results = resp.get("results", [])
-            reply = str(results[0]["output"]) if results and results[0].get("output") else "Request processed."
+            reply = _extract_reply_from_results(results, empty_fallback="Request processed.")
             return JSONResponse(content={"type": 4, "data": {"content": reply[:2000]}})
         return JSONResponse(content={"type": 1})
 
@@ -1327,7 +1361,7 @@ async def channel_webhook(channel: str, request: Request):
                     )
                     resp = result.get("response", {})
                     results = resp.get("results", [])
-                    reply = str(results[0]["output"]) if results and results[0].get("output") else "Request processed."
+                    reply = _extract_reply_from_results(results, empty_fallback="Request processed.")
                     store.append_chat_message(chat_id, "assistant", reply)
                     if access_token and phone_number_id:
                         try:
@@ -1429,7 +1463,18 @@ def run_chat(body: RunChatRequest, user: Annotated[UserRecord, Depends(get_curre
         resource="chat:run",
     )
     queen = _queen_from_request(body)
-    result = queen.run(intent=body.intent, payload=body.payload, source="beekeeper_api:chat_run")
+    try:
+        result = queen.run(intent=body.intent, payload=body.payload, source="beekeeper_api:chat_run")
+    except Exception as exc:
+        log_service_call(
+            "queen",
+            "failed",
+            source="beekeeper_api:chat_run",
+            user_id=user.user_id,
+            resource="chat:run",
+            error=_short_error(exc),
+        )
+        raise
     log_service_call(
         "queen",
         "completed",
@@ -1506,14 +1551,29 @@ def send_chat_message(
         user_id=user.user_id,
         resource="chat:message",
     )
+    _mode = getattr(body, "execution_mode", "legacy_worker") or "legacy_worker"
+    if _mode not in ("legacy_worker", "model_tools", "hybrid"):
+        _mode = "legacy_worker"
     queen = QueenAgent(
         QueenConfig(
             honeycomb_root=Path(body.honeycomb_root),
             scheduler_backend=body.scheduler,
             vector_backend=body.vector,
+            execution_mode=_mode,
         )
     )
-    result = queen.run(intent=body.intent, payload=payload, source="web_ui")
+    try:
+        result = queen.run(intent=body.intent, payload=payload, source="web_ui")
+    except Exception as exc:
+        log_service_call(
+            "queen",
+            "failed",
+            source="web_ui",
+            user_id=user.user_id,
+            resource="chat:message",
+            error=_short_error(exc),
+        )
+        raise
     log_service_call(
         "queen",
         "completed",
@@ -1523,18 +1583,7 @@ def send_chat_message(
         trace_id=result.get("trace_id"),
     )
     results = result.get("results", [])
-    raw_output = results[0].get("output", {}) if results else {}
-    reply = ""
-    for k in ("assistant_reply", "answer", "response", "content", "output", "summary", "text"):
-        v = raw_output.get(k)
-        if isinstance(v, str) and v.strip():
-            reply = v
-            break
-        if v and isinstance(v, dict) and isinstance(v.get("text"), str):
-            reply = v.get("text", "")
-            break
-    if not reply:
-        reply = str(raw_output) if raw_output else "No response."
+    reply = _extract_reply_from_results(results, empty_fallback="No response.")
     store.append_chat_message(chat_id, "assistant", reply)
     _enqueue_context_curation(
         body=body,
@@ -1572,57 +1621,63 @@ async def send_chat_message_stream(
     result_holder: list[dict[str, Any]] = []
 
     def _run() -> None:
-        log_service_call(
-            "beekeeper_api",
-            "called",
-            source="web_ui",
-            user_id=user.user_id,
-            resource="chat:message_stream",
-        )
-        queen = QueenAgent(
-            QueenConfig(
-                honeycomb_root=Path(body.honeycomb_root),
-                scheduler_backend=body.scheduler,
-                vector_backend=body.vector,
+        try:
+            log_service_call(
+                "beekeeper_api",
+                "called",
+                source="web_ui",
+                user_id=user.user_id,
+                resource="chat:message_stream",
             )
-        )
+            _em = getattr(body, "execution_mode", "legacy_worker") or "legacy_worker"
+            if _em not in ("legacy_worker", "model_tools", "hybrid"):
+                _em = "legacy_worker"
+            queen = QueenAgent(
+                QueenConfig(
+                    honeycomb_root=Path(body.honeycomb_root),
+                    scheduler_backend=body.scheduler,
+                    vector_backend=body.vector,
+                    execution_mode=_em,
+                )
+            )
 
-        def on_status(msg: str) -> None:
-            status_queue.put(msg)
+            def on_status(msg: str) -> None:
+                status_queue.put(msg)
 
-        result = queen.run(intent=body.intent, payload=payload, status_callback=on_status, source="web_ui")
-        log_service_call(
-            "queen",
-            "completed",
-            source="web_ui",
-            user_id=user.user_id,
-            resource="chat:message_stream",
-            trace_id=result.get("trace_id"),
-        )
-        status_queue.put(None)  # sentinel
-        results = result.get("results", [])
-        raw_output = results[0].get("output", {}) if results else {}
-        reply = ""
-        for k in ("assistant_reply", "answer", "response", "content", "output", "summary", "text"):
-            v = raw_output.get(k)
-            if isinstance(v, str) and v.strip():
-                reply = v
-                break
-            if v and isinstance(v, dict) and isinstance(v.get("text"), str):
-                reply = v.get("text", "")
-                break
-        if not reply:
-            reply = str(raw_output) if raw_output else "No response."
-        store.append_chat_message(chat_id, "assistant", reply)
-        _enqueue_context_curation(
-            body=body,
-            user_id=user.user_id,
-            chat_id=chat_id,
-            user_msg=content,
-            assistant_reply=reply,
-        )
-        updated = store.get_chat(chat_id)
-        result_holder.append({"chat": updated, "reply": reply})
+            result = queen.run(intent=body.intent, payload=payload, status_callback=on_status, source="web_ui")
+            log_service_call(
+                "queen",
+                "completed",
+                source="web_ui",
+                user_id=user.user_id,
+                resource="chat:message_stream",
+                trace_id=result.get("trace_id"),
+            )
+            results = result.get("results", [])
+            reply = _extract_reply_from_results(results, empty_fallback="No response.")
+            store.append_chat_message(chat_id, "assistant", reply)
+            _enqueue_context_curation(
+                body=body,
+                user_id=user.user_id,
+                chat_id=chat_id,
+                user_msg=content,
+                assistant_reply=reply,
+            )
+            updated = store.get_chat(chat_id)
+            result_holder.append({"chat": updated, "reply": reply})
+        except Exception as exc:
+            log_service_call(
+                "queen",
+                "failed",
+                source="web_ui",
+                user_id=user.user_id,
+                resource="chat:message_stream",
+                error=_short_error(exc),
+            )
+            status_queue.put(f"Execution failed: {_short_error(exc)}")
+            result_holder.append({"chat": store.get_chat(chat_id), "reply": "I hit an internal error while processing this request."})
+        finally:
+            status_queue.put(None)  # sentinel
 
     async def _stream() -> Any:
         thread = threading.Thread(target=_run)

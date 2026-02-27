@@ -124,7 +124,7 @@ def load_worker_plugins(honeycomb_root: Path) -> dict[WorkerKind | str, Any]:
             try:
                 kind: WorkerKind | str = WorkerKind(kind_str)
             except ValueError:
-                kind = kind_str if kind_str.startswith("forged_") else WorkerKind.custom
+                kind = kind_str if kind_str.startswith(("forged_", "custom_")) else WorkerKind.custom
             cls = _load_plugin_class(module_path, class_name, root=root)
             if cls is None:
                 continue

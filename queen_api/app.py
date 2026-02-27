@@ -35,14 +35,18 @@ app = FastAPI(title="Queen API", version="0.1.0", description="OpenAI-compatible
 QUEEN_MODEL_ID = "beekeeper-queen"
 
 
-def _get_queen_config() -> QueenConfig:
+def _get_queen_config(execution_mode: str | None = None) -> QueenConfig:
     honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
+    mode = execution_mode or os.getenv("BEEKEEPER_EXECUTION_MODE", "legacy_worker")
+    if mode not in ("legacy_worker", "model_tools", "hybrid"):
+        mode = "legacy_worker"
     return QueenConfig(
         honeycomb_root=honeycomb_root,
         scheduler_backend=os.getenv("BEEKEEPER_SCHEDULER_BACKEND", "auto"),
         vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
         vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
         vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+        execution_mode=mode,
     )
 
 
@@ -165,8 +169,10 @@ def chat_completions(
     x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id"),
     x_beekeeper_delegate_worker: str | None = Header(None, alias="X-Beekeeper-Delegate-Worker"),
     x_beekeeper_use_web_search: str | None = Header(None, alias="X-Beekeeper-Use-Web-Search"),
+    x_beekeeper_execution_mode: str | None = Header(None, alias="X-Beekeeper-Execution-Mode"),
+    x_beekeeper_debug: str | None = Header(None, alias="X-Beekeeper-Debug"),
 ):
-    """OpenAI-compatible chat completions. Forwards to Queen agent. X-Beekeeper-Model overrides LLM model. X-Beekeeper-User-Id enables user memory."""
+    """OpenAI-compatible chat completions. X-Beekeeper-Execution-Mode: legacy_worker|model_tools|hybrid. X-Beekeeper-Debug: include tool_trace in response."""
     intent = x_beekeeper_intent or "research_topic"
     model_override = (x_beekeeper_model or "").strip() or None
     if model_override is None:
@@ -221,7 +227,7 @@ def chat_completions(
         payload["user_memories"] = user_memories
 
     log_service_call("queen_api", "called", source="queen_api", user_id=user_id, resource="queen:chat")
-    config = _get_queen_config()
+    config = _get_queen_config(execution_mode=(x_beekeeper_execution_mode or "").strip() or None)
     queen = QueenAgent(config)
     result = queen.run(intent=intent, payload=payload, source="queen_api")
     log_service_call(
@@ -246,7 +252,7 @@ def chat_completions(
     if request.stream:
         return _stream_reply(reply)
 
-    return {
+    resp: dict = {
         "id": f"chatcmpl-{uuid4().hex}",
         "object": "chat.completion",
         "choices": [
@@ -257,6 +263,14 @@ def chat_completions(
             }
         ],
     }
+    include_debug = (x_beekeeper_debug or "").strip().lower() in ("1", "true", "yes", "on")
+    if include_debug and result.get("results"):
+        first = result["results"][0] if isinstance(result["results"][0], dict) else {}
+        tool_trace = (first.get("output") or {}).get("tool_trace")
+        if tool_trace is not None:
+            resp["tool_trace"] = tool_trace
+            resp["trace_id"] = result.get("trace_id")
+    return resp
 
 
 def _stream_reply(reply: str) -> StreamingResponse:

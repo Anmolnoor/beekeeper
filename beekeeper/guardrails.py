@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from .contracts import PolicyDecision, RuleProfile, TaskEnvelope, WorkerKind
 
@@ -150,3 +150,68 @@ class GuardrailPolicyEngine:
             return clone, "upgraded_to_premium_tier"
         clone.payload.setdefault("model_tier", "standard")
         return clone, "kept_standard_tier"
+
+
+# ---------------------------------------------------------------------------
+# Tool-call-level guardrails (for model-driven tool loop)
+# ---------------------------------------------------------------------------
+
+# Tools that correspond to high-risk actions and require HITL when in rule_profile.require_human_approval_for
+TOOL_TO_ACTION_MAP: dict[str, str] = {
+    "spawn_worker": "spawn_worker",
+    "run_task": "run_task",
+}
+
+PII_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _domains_from_tool_args(arguments: dict[str, Any]) -> list[str]:
+    """Extract domain names from tool arguments (domains list or URLs in string values)."""
+    domains: list[str] = []
+    if not isinstance(arguments, dict):
+        return domains
+    if isinstance(arguments.get("domains"), list):
+        for d in arguments["domains"]:
+            if isinstance(d, str) and d.strip():
+                domains.append(d.strip().lower())
+    for v in arguments.values():
+        if isinstance(v, str) and ("http://" in v or "https://" in v):
+            parsed = urllib.parse.urlparse(v)
+            if parsed.hostname:
+                domains.append(parsed.hostname.lower())
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, str) and ("http://" in item or "https://" in item):
+                    parsed = urllib.parse.urlparse(item)
+                    if parsed.hostname:
+                        domains.append(parsed.hostname.lower())
+    return list(dict.fromkeys(domains))
+
+
+def evaluate_tool_call(
+    tool_name: str,
+    arguments: dict[str, Any],
+    rule_profile: RuleProfile,
+) -> tuple[bool, str | None, bool]:
+    """
+    Evaluate a single tool call before execution.
+    Returns (allowed, block_reason, needs_human).
+    If allowed is False, block_reason is set. If needs_human is True, caller should enqueue HITL.
+    Evaluates: tool name (allowlist/denylist), tool args (PII, domain allowlist), HITL for high-risk tools.
+    """
+    if tool_name in (rule_profile.disallowed_tools or []):
+        return False, "tool_disallowed_by_rule", False
+    action_equivalent = TOOL_TO_ACTION_MAP.get(tool_name)
+    if action_equivalent and action_equivalent in (rule_profile.require_human_approval_for or []):
+        return True, None, True
+    haystack = " ".join(str(v) for v in arguments.values()) if isinstance(arguments, dict) else ""
+    if PII_EMAIL_PATTERN.search(haystack):
+        return False, "pii_email_in_tool_args", False
+    # External network domain: if rule restricts domains, validate any domains in tool args
+    allowed_domains = rule_profile.allowed_domains or []
+    if allowed_domains:
+        normalized_allowed = {d.lower() for d in allowed_domains}
+        for domain in _domains_from_tool_args(arguments or {}):
+            if domain and domain not in normalized_allowed:
+                return False, "domain_not_allowed", False
+    return True, None, False

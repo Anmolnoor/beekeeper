@@ -7,7 +7,7 @@ name = "beekeeper-agent-platform"
 version = "0.1.0"
 description = "Beekeeper-style multi-agent runtime with queen orchestration and ephemeral workers."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
   "python-dotenv>=1.0.0",
   "pydantic>=2.7.0",
@@ -25,6 +25,7 @@ dependencies = [
   "PyNaCl>=1.5.0",
   "croniter>=2.0.0",
   "PyYAML>=6.0",
+  "mcp>=1.0.0",
 ]
 
 [project.scripts]

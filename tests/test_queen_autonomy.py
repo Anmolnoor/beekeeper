@@ -1,6 +1,7 @@
 """Tests for Queen autonomy features: actions, memory, worker spawning."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -252,6 +253,78 @@ def test_worker_registry_register_custom_worker_merges_existing(tmp_path: Path) 
     assert set(worker["query_keywords"]) >= {"alpha", "beta"}
     assert set(worker["fallback_workers"]) >= {"web_search", "heavy_compute"}
     assert int(worker["priority"]) == 15
+
+
+def test_auto_spawn_generates_plugin_and_registry_entry(tmp_path: Path) -> None:
+    queen = _make_queen(tmp_path)
+    _stub_llm(queen)
+    _stub_searxng(queen)
+
+    intent = "new_market_scan"
+    result = queen.run(
+        intent=intent,
+        payload={
+            "query": "scan market opportunities for developer tools",
+            "delegate_to_worker": True,
+        },
+    )
+    assert result.get("results")
+    worker_kind = f"custom_{intent}"
+    plugin_file = tmp_path / ".honeycomb" / "workers" / "generated" / f"{worker_kind}.py"
+    assert plugin_file.exists()
+
+    plugins_json = tmp_path / ".honeycomb" / "workers" / "plugins.json"
+    data = json.loads(plugins_json.read_text(encoding="utf-8"))
+    entries = list(data.get("workers", []))
+    assert any(e.get("worker_kind") == worker_kind for e in entries)
+    assert worker_kind in queen.worker_runtime._workers
+
+
+def test_auto_spawn_second_run_reuses_generated_worker_without_respawn(tmp_path: Path) -> None:
+    queen = _make_queen(tmp_path)
+    _stub_llm(queen)
+    _stub_searxng(queen)
+
+    intent = "forecast_coverage"
+    payload = {
+        "query": "forecast test coverage trend next quarter",
+        "delegate_to_worker": True,
+    }
+    first = queen.run(intent=intent, payload=dict(payload))
+    assert first.get("results")
+    second = queen.run(intent=intent, payload=dict(payload))
+    assert second.get("results")
+
+    first_events = queen.honeycomb.read_events(first["trace_id"])
+    second_events = queen.honeycomb.read_events(second["trace_id"])
+    first_spawn = [e for e in first_events if e.get("kind") == "auto_worker_spawn"]
+    second_spawn = [e for e in second_events if e.get("kind") == "auto_worker_spawn"]
+    assert first_spawn, "first run should spawn a custom worker"
+    assert not second_spawn, "second run should reuse existing worker without respawn"
+    assert "custom_forecast_coverage" in queen.worker_runtime._workers
+
+
+def test_auto_spawn_plugin_failure_falls_back_to_forged(tmp_path: Path, monkeypatch) -> None:
+    queen = _make_queen(tmp_path)
+    _stub_llm(queen)
+    _stub_searxng(queen)
+
+    def _raise_plugin_error(*_args, **_kwargs):
+        raise RuntimeError("forge_failed")
+
+    monkeypatch.setattr(queen, "_ensure_worker_plugin", _raise_plugin_error)
+    result = queen.run(
+        intent="edge_case_worker",
+        payload={
+            "query": "handle fallback safely",
+            "delegate_to_worker": True,
+        },
+    )
+    assert result.get("results")
+    events = queen.honeycomb.read_events(result["trace_id"])
+    spawn_events = [e for e in events if e.get("kind") == "auto_worker_spawn"]
+    assert spawn_events
+    assert spawn_events[-1].get("forge_error") == "forge_failed"
 
 
 # ---------------------------------------------------------------------------
