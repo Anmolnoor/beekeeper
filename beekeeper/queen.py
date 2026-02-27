@@ -1088,6 +1088,12 @@ class QueenAgent:
         if intent == "context_curation":
             return WorkerKind.context_curator
         query = str(payload.get("query") or payload.get("topic") or "").strip()
+        # File/dir operations: parse action from query, enrich payload, route to FileWorker
+        if query:
+            file_action = self._infer_file_action(query)
+            if file_action:
+                payload.update(file_action)
+                return WorkerKind.file_system
         details = self.worker_registry.select_worker_details(intent, payload, query)
         worker_kind = details["worker_kind"]
         best_score = details["best_score"]
@@ -1438,6 +1444,37 @@ class QueenAgent:
             "step_count": final.step_count,
         }
 
+    # (operation, compiled_regex, path_group, content_group_or_None)
+    _FILE_ACTION_PATTERNS: list[tuple[str, Any, int, int | None]] = []
+
+    @classmethod
+    def _build_file_action_patterns(cls) -> None:
+        cls._FILE_ACTION_PATTERNS = [
+            ("write",  re.compile(r'create\s+(?:a\s+)?file\s+["\']?(\S+?)["\']?\s+with\s+content\s+(.+)',   re.IGNORECASE | re.DOTALL), 1, 2),
+            ("write",  re.compile(r'write\s+["\']?(.+?)["\']?\s+to\s+(?:file\s+)?["\']?(\S+?)["\']?\s*$',  re.IGNORECASE | re.DOTALL), 2, 1),
+            ("write",  re.compile(r'save\s+["\']?(.+?)["\']?\s+(?:to|as)\s+["\']?(\S+?)["\']?\s*$',        re.IGNORECASE | re.DOTALL), 2, 1),
+            ("append", re.compile(r'append\s+["\']?(.+?)["\']?\s+to\s+(?:file\s+)?["\']?(\S+?)["\']?\s*$', re.IGNORECASE | re.DOTALL), 2, 1),
+            ("delete", re.compile(r'(?:delete|remove|rm)\s+(?:(?:the\s+)?file\s+)?["\']?(\S+\.\S+)["\']?\s*$', re.IGNORECASE), 1, None),
+            ("mkdir",  re.compile(r'(?:create|make|mkdir)\s+(?:a\s+)?(?:directory|dir|folder)\s+["\']?(\S+?)["\']?\s*$', re.IGNORECASE), 1, None),
+        ]
+
+    @classmethod
+    def _infer_file_action(cls, query: str) -> dict[str, Any] | None:
+        """Parse file/dir operations from a natural-language query.
+        Returns a dict with keys: operation, file_path, content (if applicable).
+        Returns None if the query is not a file operation.
+        """
+        if not cls._FILE_ACTION_PATTERNS:
+            cls._build_file_action_patterns()
+        for op, pattern, path_grp, content_grp in cls._FILE_ACTION_PATTERNS:
+            m = pattern.search(query)
+            if m:
+                result: dict[str, Any] = {"operation": op, "file_path": m.group(path_grp).strip()}
+                if content_grp is not None:
+                    result["content"] = m.group(content_grp).strip()
+                return result
+        return None
+
     def _should_delegate_to_workers(self, payload: dict[str, Any]) -> bool:
         """False = Queen responds directly (Ollama only). True = delegate to workers."""
         if payload.get("delegate_to_worker") is True:
@@ -1447,6 +1484,10 @@ class QueenAgent:
         if payload.get("domains"):
             return True
         if payload.get("numbers") is not None or payload.get("operation"):
+            return True
+        # File / directory operations must be delegated, not answered in direct chat
+        query = str(payload.get("query") or payload.get("topic") or "").strip()
+        if query and self._infer_file_action(query):
             return True
         return False
 
