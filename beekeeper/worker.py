@@ -339,34 +339,55 @@ class ForgedWorker(BaseSpecialistWorker):
             openai_timeout_seconds=openai_timeout_seconds,
         )
 
-    _ACTION_SYSTEM = (
-        "You are an autonomous agent that can perform real OS actions.\n"
-        "Analyse the user request and respond with a JSON object (no markdown fences).\n\n"
-        "Supported actions:\n"
-        '  {"action":"write_file","path":"<relative or absolute path>","content":"<file content>"}\n'
-        '  {"action":"append_file","path":"<path>","content":"<text to append>"}\n'
-        '  {"action":"delete_file","path":"<path>"}\n'
-        '  {"action":"make_dir","path":"<directory path>"}\n'
-        '  {"action":"answer","reply":"<plain text answer>"}\n\n'
-        "Rules:\n"
-        "- Use write_file / append_file / delete_file / make_dir ONLY when the user explicitly asks to create, write, append, delete, or make a file/directory.\n"
-        "- Use answer for everything else (research, explain, summarise, etc.).\n"
-        "- Paths are relative to the current working directory unless the user specifies an absolute path.\n"
-        "- Return ONLY the JSON object, nothing else.\n"
-    )
+    import re as _re
 
-    def _parse_action(self, raw: str) -> dict[str, Any]:
-        """Strip markdown fences and parse the JSON action from the LLM reply."""
-        text = raw.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            text = "\n".join(l for l in lines[1:] if not l.strip().startswith("```")).strip()
-        # Find first { … } block
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            text = text[start:end]
-        return json.loads(text)
+    # Patterns tried in order; first match wins.
+    # Each tuple: (action_kind, compiled_regex, path_group, content_group_or_None)
+    _FILE_PATTERNS: list[tuple[str, Any, int, int | None]] = []
+
+    @classmethod
+    def _build_patterns(cls) -> None:
+        import re
+        cls._FILE_PATTERNS = [
+            # "create a file foo.txt with content Hello World"
+            ("write_file", re.compile(
+                r'create\s+(?:a\s+)?file\s+["\']?(\S+?)["\']?\s+with\s+content\s+(.+)',
+                re.IGNORECASE | re.DOTALL), 1, 2),
+            # "write Hello World to foo.txt"
+            ("write_file", re.compile(
+                r'write\s+["\']?(.+?)["\']?\s+to\s+(?:file\s+)?["\']?(\S+?)["\']?\s*$',
+                re.IGNORECASE | re.DOTALL), 2, 1),
+            # "save Hello World to/as foo.txt"
+            ("write_file", re.compile(
+                r'save\s+["\']?(.+?)["\']?\s+(?:to|as)\s+["\']?(\S+?)["\']?\s*$',
+                re.IGNORECASE | re.DOTALL), 2, 1),
+            # "make/create/mkdir directory foo"
+            ("make_dir", re.compile(
+                r'(?:create|make|mkdir)\s+(?:a\s+)?(?:directory|dir|folder)\s+["\']?(\S+?)["\']?\s*$',
+                re.IGNORECASE), 1, None),
+            # "delete/remove/rm file foo.txt"
+            ("delete_file", re.compile(
+                r'(?:delete|remove|rm)\s+(?:(?:the\s+)?file\s+)?["\']?(\S+\.\S+)["\']?\s*$',
+                re.IGNORECASE), 1, None),
+            # "append Hello World to foo.txt"
+            ("append_file", re.compile(
+                r'append\s+["\']?(.+?)["\']?\s+to\s+(?:file\s+)?["\']?(\S+?)["\']?\s*$',
+                re.IGNORECASE | re.DOTALL), 2, 1),
+        ]
+
+    def _infer_action_from_query(self, query: str) -> dict[str, Any] | None:
+        """Parse file/dir operations directly from the query — no LLM needed."""
+        if not self.__class__._FILE_PATTERNS:
+            self.__class__._build_patterns()
+        for action_kind, pattern, path_grp, content_grp in self.__class__._FILE_PATTERNS:
+            m = pattern.search(query)
+            if not m:
+                continue
+            result: dict[str, Any] = {"action": action_kind, "path": m.group(path_grp).strip()}
+            if content_grp is not None:
+                result["content"] = m.group(content_grp).strip()
+            return result
+        return None
 
     def _execute_action(self, action: dict[str, Any]) -> tuple[str, list[str]]:
         """Run the parsed action. Returns (human summary, list of evidence strings)."""
@@ -416,32 +437,36 @@ class ForgedWorker(BaseSpecialistWorker):
         prior = task.payload.get("messages") or []
         messages = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in prior if isinstance(m, dict)]
 
-        # Step 1: ask LLM what action to take (structured JSON)
-        raw_action, source = self.llm_router.call(
-            prompt=query,
-            system=self._ACTION_SYSTEM,
-            messages=messages or None,
-        )
-
-        # Step 2: try to parse and execute the action
-        action_summary = raw_action or ""
+        # Step 1: try to infer a file/dir action directly from the query (no LLM, fully reliable)
+        action = self._infer_action_from_query(query)
         evidence: list[str] = []
-        if raw_action:
+        source = "local"
+
+        if action:
+            # Execute without calling the LLM at all
+            self._emit_status(context, f"Executing {action['action']}…")
             try:
-                action = self._parse_action(raw_action)
-                self._emit_status(context, f"Executing action: {action.get('action', '?')}…")
                 action_summary, evidence = self._execute_action(action)
             except Exception as exc:
-                # JSON parse failed or action failed — fall back to treating raw reply as plain text
-                action_summary = raw_action
+                action_summary = f"Action failed: {exc}"
                 evidence = [f"action_error:{exc}"]
+        else:
+            # Step 2: not a file op — ask LLM for a plain-text answer (no JSON required)
+            self._emit_status(context, "Answering with LLM…")
+            user_system = _build_user_context_system(task.payload)
+            raw_reply, source = self.llm_router.call(
+                prompt=query,
+                system=user_system,
+                messages=messages or None,
+            )
+            action_summary = raw_reply or "I could not process this request."
 
         return WebSearchOutput(
             query=query,
             evidence=[],
-            assistant_reply=action_summary or "I could not process this request.",
+            assistant_reply=action_summary,
             response_source=source,
-            synthesis=f"ForgedWorker executed. evidence={evidence}",
+            synthesis=f"ForgedWorker. evidence={evidence}",
         ).model_dump(mode="json")
 
 
