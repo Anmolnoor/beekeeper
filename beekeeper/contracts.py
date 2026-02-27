@@ -37,6 +37,7 @@ class WorkerKind(str, Enum):
     custom = "custom"
     forged = "forged"
     context_curator = "context_curator"
+    file_system = "file_system"
 
 
 class ProfileType(str, Enum):
@@ -320,6 +321,17 @@ class ContextCuratorOutput(BaseModel):
     notes: str = ""
 
 
+class FileOperationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["write", "read", "append", "mkdir"] = "write"
+    file_path: str
+    success: bool
+    bytes_written: int = 0
+    content_preview: str = ""
+    notes: str = ""
+
+
 class TaskEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -381,3 +393,94 @@ class QueenActionResult(BaseModel):
     memory_snippets: list[str] = Field(default_factory=list)
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Model-driven tool invocation contracts
+# ---------------------------------------------------------------------------
+
+class ToolSpec(BaseModel):
+    """Schema for a single tool exposed to the model (OpenAI-style / MCP-compatible)."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str
+    parameters: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}, "required": []},
+        description="JSON Schema for tool arguments",
+    )
+    trust_tier: TrustTier = TrustTier.medium
+    source: Literal["worker", "action", "mcp", "plugin"] = "worker"
+    version: str = SCHEMA_VERSION
+
+
+class ToolCall(BaseModel):
+    """A single tool invocation requested by the model."""
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str = Field(default_factory=lambda: str(uuid4()))
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str = ""
+    step_index: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    version: str = SCHEMA_VERSION
+
+
+class ToolResult(BaseModel):
+    """Result of executing a tool call."""
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str
+    tool_name: str
+    success: bool
+    output: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    cost_metrics: CostMetrics = Field(default_factory=CostMetrics)
+    policy_flags: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+    version: str = SCHEMA_VERSION
+
+
+class ToolExecutionPolicy(BaseModel):
+    """Policy governing the tool loop: limits and allowlists."""
+    model_config = ConfigDict(extra="forbid")
+
+    max_steps: int = Field(default=10, ge=1, le=50)
+    max_cost_per_turn_usd: float = Field(default=2.0, ge=0.0)
+    require_human_approval_for_tools: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] | None = Field(default=None, description="None = allow all registered")
+    disallowed_tools: list[str] = Field(default_factory=list)
+    version: str = SCHEMA_VERSION
+
+
+class ToolLoopState(BaseModel):
+    """Mutable state for one tool-calling loop (trace-scoped)."""
+    model_config = ConfigDict(extra="allow")
+
+    trace_id: str
+    step_index: int = 0
+    message_history: list[dict[str, Any]] = Field(default_factory=list)
+    tool_calls_this_turn: list[ToolCall] = Field(default_factory=list)
+    tool_results_this_turn: list[ToolResult] = Field(default_factory=list)
+    accumulated_cost_usd: float = 0.0
+    terminated: bool = False
+    final_text: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    version: str = SCHEMA_VERSION
+
+
+class FinalResponse(BaseModel):
+    """Normalized final output from a model-driven tool loop."""
+    model_config = ConfigDict(extra="forbid")
+
+    final_text: str
+    tool_trace: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Ordered list of {tool_call, tool_result} for observability",
+    )
+    cost_metrics: CostMetrics = Field(default_factory=CostMetrics)
+    status: Literal["success", "partial", "failed", "blocked"] = "success"
+    step_count: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    version: str = SCHEMA_VERSION

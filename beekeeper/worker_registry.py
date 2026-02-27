@@ -52,6 +52,26 @@ DEFAULT_REGISTRY = {
             "priority": 10,
             "fallback_workers": [],
         },
+        {
+            "worker_kind": "file_system",
+            "name": "File System",
+            "description": "Creates, reads, writes, and manages files and directories on the local filesystem.",
+            "capabilities": ["file_write", "file_read", "file_create", "directory_create", "save_report"],
+            "intent_patterns": [
+                "file_write", "file_read", "file_create", "save_file", "write_file",
+                "create_file", "write_report", "save_report", "create_report",
+                "file_operation", "disk_write",
+            ],
+            "payload_triggers": ["file_path", "output_path", "path", "save_to", "write_to"],
+            "query_keywords": [
+                "write to file", "save to file", "create file", "write file",
+                "save report", "create report", "write report", "save as",
+                "output to", "write to", "save to", "create a file",
+                "make a file", "generate file", ".md", ".txt", ".json", ".csv",
+            ],
+            "priority": 30,
+            "fallback_workers": [],
+        },
     ],
 }
 
@@ -149,6 +169,21 @@ class WorkerRegistry:
         content_score is the score without priority — 0 means no intent/payload/keyword matched.
         Queen uses content_score==0 to trigger ForgedWorker and auto-spawn a new worker.
         """
+        details = self.select_worker_details(intent, payload, query)
+        return (
+            details["worker_kind"],
+            details["fallback_workers"],
+            details["best_score"],
+            details["content_score"],
+        )
+
+    def select_worker_details(
+        self,
+        intent: str,
+        payload: dict[str, Any],
+        query: str = "",
+    ) -> dict[str, Any]:
+        """Pick worker and return both enum + raw worker_kind string."""
         reg = self._load()
         workers = reg.get("workers", [])
         query_lower = (query or "").lower()
@@ -195,12 +230,19 @@ class WorkerRegistry:
                 best_content_score = content_score
 
         if best_match and best_score > 0:
-            kind = _worker_kind_from_str(best_match["worker_kind"])
+            selected_worker_kind_str = str(best_match["worker_kind"])
+            kind = _worker_kind_from_str(selected_worker_kind_str)
             fallbacks = [
                 _worker_kind_from_str(f)
                 for f in best_match.get("fallback_workers", [])
             ]
-            return kind, fallbacks, best_score, best_content_score
+            return {
+                "worker_kind": kind,
+                "worker_kind_str": selected_worker_kind_str,
+                "fallback_workers": fallbacks,
+                "best_score": best_score,
+                "content_score": best_content_score,
+            }
 
         default = self.get_default_worker()
         default_entry = next(
@@ -208,7 +250,13 @@ class WorkerRegistry:
             None,
         )
         fallbacks = list(default_entry.get("fallback_workers", [])) if default_entry else []
-        return default, [_worker_kind_from_str(f) for f in fallbacks], max(0, best_score), 0
+        return {
+            "worker_kind": default,
+            "worker_kind_str": str(default.value),
+            "fallback_workers": [_worker_kind_from_str(f) for f in fallbacks],
+            "best_score": max(0, best_score),
+            "content_score": 0,
+        }
 
     def ensure_registry_file(self) -> Path:
         """Create the registry file if missing (so users can edit it)."""

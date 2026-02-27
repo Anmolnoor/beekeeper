@@ -17,12 +17,28 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _safe_error_message(exc: Exception) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return text[:240]
+
+
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
 
     text: str
     source: str  # "ollama", "gemini", "openai", "fallback"
+    model: str | None = None
+
+
+@dataclass
+class LLMDecision:
+    """Normalized decision from a tool-capable LLM call: either tool_calls or final_text."""
+
+    tool_calls: list[dict[str, Any]]  # [{"name": str, "arguments": dict}]
+    final_text: str | None  # If set, loop can terminate with this as the answer
+    error: str | None = None
+    source: str = "fallback"
     model: str | None = None
 
 
@@ -39,6 +55,15 @@ class LLMProvider(ABC):
     ) -> LLMResponse | None:
         """Send a chat request. model_override selects model for this call. Returns None on failure."""
         ...
+
+    def chat_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model_override: str | None = None,
+    ) -> LLMDecision | None:
+        """Optional: provider-native tool calling. Returns None if not supported or on failure."""
+        return None
 
 
 class OllamaProvider(LLMProvider):
@@ -88,8 +113,15 @@ class OllamaProvider(LLMProvider):
             text = str(raw.get("message", raw).get("content", raw.get("response", ""))).strip()
             if text:
                 return LLMResponse(text=text, source="ollama", model=model)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_service_call(
+                "ollama",
+                "failed",
+                source="queen",
+                resource="ollama:chat",
+                error=_safe_error_message(exc),
+                extra={"model": model},
+            )
         return None
 
 
@@ -166,8 +198,15 @@ class GeminiProvider(LLMProvider):
                 error=f"HTTPError {exc.code}",
                 extra={"status_code": exc.code, "model": model},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_service_call(
+                "gemini",
+                "failed",
+                source="queen",
+                resource="gemini:chat",
+                error=_safe_error_message(exc),
+                extra={"model": model},
+            )
         return None
 
 
@@ -222,9 +261,69 @@ class OpenAIProvider(LLMProvider):
                 text = str(msg.get("content", "")).strip()
                 if text:
                     return LLMResponse(text=text, source="openai", model=model)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_service_call(
+                "openai",
+                "failed",
+                source="queen",
+                resource="openai:chat",
+                error=_safe_error_message(exc),
+                extra={"model": model},
+            )
         return None
+
+    def chat_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model_override: str | None = None,
+    ) -> LLMDecision | None:
+        """OpenAI-native tool calling via chat/completions with tools parameter."""
+        if not self.api_key:
+            return None
+        model = model_override or self.model
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+        if tools:
+            payload["tools"] = [{"type": "function", "function": t["function"]} for t in tools if t.get("type") == "function" and t.get("function")]
+        url = f"{self.base_url}/chat/completions"
+        req = urllib.request.Request(
+            url=url,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+            choices = raw.get("choices", [])
+            if not isinstance(choices, list) or not choices:
+                return None
+            msg = choices[0].get("message", {})
+            content = (msg.get("content") or "").strip() if isinstance(msg.get("content"), str) else ""
+            tool_calls_raw = msg.get("tool_calls") or []
+            tool_calls: list[dict[str, Any]] = []
+            for tc in tool_calls_raw:
+                if isinstance(tc, dict):
+                    fn = tc.get("function") or {}
+                    name = fn.get("name") or ""
+                    args_str = fn.get("arguments") or "{}"
+                    try:
+                        args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_calls.append({"name": name, "arguments": args, "id": tc.get("id")})
+            return LLMDecision(
+                tool_calls=tool_calls,
+                final_text=content if content else None,
+                source="openai",
+                model=model,
+            )
+        except Exception as exc:
+            log_service_call("openai", "failed", source="queen", resource="openai:chat_with_tools", error=_safe_error_message(exc), extra={"model": model})
+            return None
 
 
 def _resolve_model_for_tier(tier: str, provider: str) -> str | None:
@@ -281,6 +380,71 @@ class LLMRouter:
                 )
                 return resp.text, resp.source
         return None, "fallback"
+
+    def call_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model_tier: str | None = None,
+        model_override: str | None = None,
+    ) -> LLMDecision:
+        """
+        Provider-agnostic tool-calling round. Tries each provider's chat_with_tools;
+        if none support tools or all fail, falls back to normal chat and returns
+        LLMDecision(final_text=<response>, tool_calls=[]) so the loop can terminate.
+        """
+        resolved_model: str | None = model_override
+        if not resolved_model and model_tier:
+            for p in self.providers:
+                provider_name = (
+                    "ollama" if isinstance(p, OllamaProvider)
+                    else "gemini" if isinstance(p, GeminiProvider)
+                    else "openai" if isinstance(p, OpenAIProvider)
+                    else "ollama"
+                )
+                resolved = _resolve_model_for_tier(model_tier, provider_name)
+                if resolved:
+                    resolved_model = resolved
+                    break
+        for p in self.providers:
+            if hasattr(p, "chat_with_tools") and p.chat_with_tools:
+                decision = p.chat_with_tools(messages, tools, model_override=resolved_model)
+                if decision is not None:
+                    log_service_call(
+                        decision.source,
+                        "completed",
+                        source="queen",
+                        resource=f"{decision.source}:chat_with_tools",
+                        extra={"model": decision.model} if decision.model else None,
+                    )
+                    return decision
+        text_parts: list[str] = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(str(p.get("text", p)) for p in content if isinstance(p, dict))
+            text_parts.append(f"[{role}]\n{content}")
+        prompt = text_parts[-1] if text_parts else ""
+        system = None
+        for m in messages:
+            if m.get("role") == "system":
+                system = m.get("content", "")
+                break
+        fallback_messages: list[dict[str, str]] = []
+        for m in messages:
+            if m.get("role") not in ("user", "assistant", "system"):
+                continue
+            c = m.get("content", "")
+            content_str = c if isinstance(c, str) else json.dumps(c, ensure_ascii=True)[:8000]
+            fallback_messages.append({"role": m.get("role", "user"), "content": content_str})
+        text, source = self.call(prompt, system=system, messages=fallback_messages if len(fallback_messages) > 1 else None, model_override=resolved_model)
+        return LLMDecision(
+            tool_calls=[],
+            final_text=text,
+            error=None if text else "fallback_chat_failed",
+            source=source,
+        )
 
     @classmethod
     def from_env(cls) -> "LLMRouter":

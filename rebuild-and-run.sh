@@ -2,6 +2,16 @@
 set -e
 cd "$(dirname "$0")"
 [ -d ".venv" ] && source .venv/bin/activate
+
+# Require Python 3.10+ (needed for mcp and other deps)
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+  echo "ERROR: This project requires Python 3.10+. Current: $(python3 --version 2>/dev/null || true)"
+  echo "Recreate the venv with Python 3.10+, then re-run this script:"
+  echo "  rm -rf .venv && python3.10 -m venv .venv && source .venv/bin/activate"
+  echo "  # or: python3.11 -m venv .venv   if you have 3.11"
+  exit 1
+fi
+
 pip install -e . -q
 
 COMPOSE_CMD=""

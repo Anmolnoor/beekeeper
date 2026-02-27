@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,7 +87,14 @@ def log_service_call(
             with _audit_lock:
                 with path.open("a", encoding="utf-8") as f:
                     f.write(line)
-        except Exception:
-            pass  # Never fail the request path
+        except Exception as exc:
+            # Keep audit best-effort and non-blocking, but surface failures for operators.
+            try:
+                print(
+                    f"[beekeeper.audit] failed to write audit entry: {exc}",
+                    file=sys.stderr,
+                )
+            except Exception:
+                pass
 
     threading.Thread(target=_write, daemon=True).start()

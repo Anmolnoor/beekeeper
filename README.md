@@ -1,6 +1,6 @@
 # Beekeeper Agent Platform
 
-Multi-agent runtime: Queen decomposes requests into tasks, ephemeral workers execute them, honeycomb stores traces and governance.
+**Governed agent runtime with tool-level policy enforcement:** Queen orchestrates tasks, every tool call is checked against guardrails, and Honeycomb stores traces and approvals.
 
 ## Quick Start (5 min)
 
@@ -22,6 +22,14 @@ beekeeper run --scheduler auto --vector memory --query "best agent sdk patterns"
 - **Queen** — Planner/router that decomposes intents into tasks and delegates to workers.
 - **Workers** — Ephemeral specialists: `web_search`, `heavy_compute`, `audit`, and `forged` (for unmatched intents).
 - **Honeycomb** — Append-only store for events, artifacts, traces, and HITL approvals.
+- **Tools** — Model-driven tool loop (ToolLoopEngine) with policy checks; optional MCP servers (stdio/HTTP) for external tools.
+
+## What makes Beekeeper different
+
+- **Tool-level policy** — Every tool goes through the ToolRegistry and guardrails (PII, domain allowlists, HITL for high-risk tools). No raw tool execution without policy.
+- **Dual execution** — Legacy worker dispatch and/or model-driven tool loop; run in `legacy_worker`, `model_tools`, or `hybrid` mode. Optional MCP tools from external servers.
+- **Governance and audit** — Honeycomb records every event; HITL for sensitive actions; optional audit worker for validation.
+- Unlike generic agent frameworks (e.g. LangGraph) or pure chat gateways (e.g. OpenClaw), Beekeeper is built for teams that need policy enforcement, audit trails, and human-in-the-loop on tool use.
 
 ## Key Commands
 
@@ -59,7 +67,13 @@ High-risk actions (e.g. `payment_action`, `data_delete`) require human approval.
 
 ## Worker Forge
 
-When no worker matches an intent (score ≤ 10), Queen routes to the `forged` worker, which uses the LLM to fulfill the request directly.
+When no worker matches an intent (no content match), Queen auto-forges a custom worker on demand by:
+- registering a `custom_*` worker profile in the worker registry,
+- generating a worker plugin in `.honeycomb/workers/generated/`,
+- updating `.honeycomb/workers/plugins.json`, and
+- hot-reloading worker plugins at runtime.
+
+Current request still falls back safely to `forged` execution if generation/loading fails; subsequent matching intents route through the generated custom worker.
 
 ## Docs
 

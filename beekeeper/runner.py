@@ -144,6 +144,7 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
             print("  /tree [trace_id]    show trace tree")
             print("  /trace [trace_id]   show trace events and details")
             print("  /exit               leave chat")
+            print("  Start chat with --quiet to suppress step-by-step progress.")
             print("Input mode:")
             print("  plain text       -> sent as payload {'query': <text>}")
             print("  JSON object      -> sent as raw payload")
@@ -226,8 +227,16 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
         if model_override:
             payload["model_override"] = model_override
 
+        def _on_status(msg: str) -> None:
+            print(f"  → {msg}", flush=True, file=sys.stderr)
+
         try:
-            output = queen.run(intent=current_intent, payload=payload, source="cli")
+            output = queen.run(
+                intent=current_intent,
+                payload=payload,
+                source="cli",
+                status_callback=None if getattr(args, "quiet", False) else _on_status,
+            )
         except Exception as exc:
             print(f"queen> request failed: {exc}")
             continue
@@ -1168,6 +1177,7 @@ def main() -> None:
     chat_parser.add_argument("--intent", default="research_topic")
     chat_parser.add_argument("--honeycomb-root", default=".honeycomb")
     chat_parser.add_argument("--max-reruns", type=int, default=1)
+    chat_parser.add_argument("--quiet", action="store_true", help="Suppress step-by-step progress; show only final reply")
 
     doctor_parser = subparsers.add_parser("doctor", help="Check Beekeeper service connectivity")
     doctor_parser.add_argument(
