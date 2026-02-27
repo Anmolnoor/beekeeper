@@ -440,7 +440,7 @@ class ForgedWorker(BaseSpecialistWorker):
         # Step 1: try to infer a file/dir action directly from the query (no LLM, fully reliable)
         action = self._infer_action_from_query(query)
         evidence: list[str] = []
-        source = "local"
+        source = "fallback"
 
         if action:
             # Execute without calling the LLM at all
