@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import socket
@@ -62,6 +63,9 @@ from .skill_loader import load_skills_from_md
 from .autonomy import AutonomyPolicy, DEFAULT_AUTONOMY_POLICY
 from .queen_updates import write_queen_update
 from .queen_actions import ActionContext, QueenActionLoop, build_default_action_registry
+from .tool_adapters import register_action_tools, register_worker_tools
+from .tool_runtime import ToolExecutionPolicy, ToolExecutor, ToolLoopEngine, ToolRegistry
+from .llm_provider import build_llm_router
 
 
 @dataclass
@@ -99,6 +103,7 @@ class QueenConfig:
     worker_audit_blueprint_id: str = "blueprint.worker.audit"
     worker_context_curator_blueprint_id: str = "blueprint.worker.context_curator"
     autonomy_policy: AutonomyPolicy | None = None
+    execution_mode: str = "legacy_worker"  # legacy_worker | model_tools | hybrid
 
 
 class QueenAgent:
@@ -153,6 +158,68 @@ class QueenAgent:
         self.queen_soul = queen_profiles.soul
         self.autonomy_policy = self.config.autonomy_policy or DEFAULT_AUTONOMY_POLICY
         self._action_registry = build_default_action_registry()
+        self._llm_router = build_llm_router(
+            llm_providers=self.config.llm_providers or None,
+            ollama_base_url=self.config.ollama_base_url,
+            ollama_model=self.config.ollama_model,
+            ollama_timeout_seconds=self.config.ollama_timeout_seconds,
+            gemini_api_key=self.config.gemini_api_key,
+            gemini_model=self.config.gemini_model,
+            gemini_timeout_seconds=self.config.gemini_timeout_seconds,
+            openai_api_key=self.config.openai_api_key,
+            openai_model=self.config.openai_model,
+            openai_base_url=self.config.openai_base_url,
+            openai_timeout_seconds=self.config.openai_timeout_seconds,
+        )
+        self._tool_registry: ToolRegistry | None = None
+        self._tool_executor: ToolExecutor | None = None
+        self._tool_loop_engine: ToolLoopEngine | None = None
+        if self.config.execution_mode in ("model_tools", "hybrid"):
+            self._tool_registry = ToolRegistry()
+            register_worker_tools(
+                self._tool_registry,
+                self.worker_runtime,
+                self.honeycomb,
+                self.registry,
+            )
+
+            def _action_ctx_factory() -> ActionContext:
+                return ActionContext(
+                    honeycomb_root=self.config.honeycomb_root,
+                    honeycomb=self.honeycomb,
+                    worker_runtime=self.worker_runtime,
+                    registry=self.registry,
+                    worker_registry=self.worker_registry,
+                )
+
+            register_action_tools(
+                self._tool_registry,
+                self._action_registry,
+                _action_ctx_factory,
+            )
+            policy = ToolExecutionPolicy(
+                max_steps=10,
+                max_cost_per_turn_usd=2.0,
+                require_human_approval_for_tools=["spawn_worker"],
+            )
+
+            def _tool_guardrail(tool_name: str, arguments: dict[str, Any]) -> tuple[bool, str | None, bool]:
+                from .guardrails import evaluate_tool_call
+                rule = self.registry.resolve_profiles(self.config.queen_blueprint_id).rule
+                return evaluate_tool_call(tool_name, arguments, rule)
+
+            self._tool_executor = ToolExecutor(
+                self._tool_registry,
+                honeycomb=self.honeycomb,
+                policy=policy,
+                tool_guardrail_fn=_tool_guardrail,
+            )
+            self._tool_loop_engine = ToolLoopEngine(self._tool_executor, policy=policy)
+            try:
+                from .mcp_transport import register_mcp_servers_from_config
+                register_mcp_servers_from_config(self._tool_registry)
+            except Exception:
+                pass
 
     def _build_scheduler(self) -> Scheduler | None:
         if self.config.scheduler_backend == "celery":
@@ -582,6 +649,319 @@ class QueenAgent:
             return ["heavy_compute", "web_search"]
         return ["web_search"]
 
+    @staticmethod
+    def _worker_class_name(worker_kind_str: str) -> str:
+        tokens = [token for token in re.split(r"[^a-zA-Z0-9]+", worker_kind_str) if token]
+        base = "".join(token[:1].upper() + token[1:] for token in tokens) or "CustomWorker"
+        if not base.endswith("Worker"):
+            base += "Worker"
+        return base
+
+    @staticmethod
+    def _build_forged_worker_source(worker_kind_str: str, class_name: str, intent: str, name: str) -> str:
+        safe_name = name.replace('"', "'")
+        safe_intent = intent.replace('"', "'")
+        return (
+            '"""Auto-generated worker plugin for on-demand forged routing."""\n'
+            "from __future__ import annotations\n\n"
+            "from beekeeper.worker import ForgedWorker\n\n\n"
+            f"class {class_name}(ForgedWorker):\n"
+            f'    """Generated worker for intent "{safe_intent}" ({safe_name})."""\n'
+            f'    worker_kind = "{worker_kind_str}"\n'
+        )
+
+    def _gather_worker_build_context(self, intent: str, payload: dict[str, Any]) -> str:
+        """Ask the LLM for a 3-5 sentence technical spec before generating worker code.
+        Returns empty string on any error — never raises.
+        """
+        try:
+            query = str(payload.get("query") or payload.get("topic") or intent)
+            payload_keys = [k for k in payload if not k.startswith("_")]
+            system_prompt = (
+                "You are a software architect for the Beekeeper autonomous agent platform.\n"
+                "Provide a concise 3-5 sentence technical specification for a worker that will handle the given intent.\n"
+                "Cover: step-by-step logic the worker should follow, relevant payload fields to use, "
+                "appropriate stdlib modules, and expected output format.\n"
+                "Be precise and implementation-focused. No code, just the spec."
+            )
+            user_prompt = (
+                f"Intent: {intent}\n"
+                f"Task description: {query}\n"
+                f"Available payload keys: {payload_keys}\n\n"
+                "Write the technical specification for the worker."
+            )
+            reply, _source = self.worker_runtime.direct_chat(
+                query=user_prompt,
+                system=system_prompt,
+            )
+            return (reply or "").strip()
+        except Exception:
+            return ""
+
+    def _generate_worker_source_via_llm(
+        self,
+        worker_kind_str: str,
+        class_name: str,
+        intent: str,
+        name: str,
+        payload: dict[str, Any],
+        build_context: str = "",
+    ) -> str:
+        """Ask the LLM to generate a real specialist worker for this intent.
+        Returns Python source code. Raises on failure so caller can fall back.
+        """
+        query = str(payload.get("query") or payload.get("topic") or intent)
+        payload_keys = [k for k in payload if not k.startswith("_")]
+
+        system_prompt = (
+            "You are a Python code generator for the Beekeeper autonomous agent platform.\n"
+            "Generate a specialist Worker class for a specific task type.\n\n"
+            "## Rules\n"
+            "- Inherit from ForgedWorker (provides self.llm_router for LLM calls)\n"
+            "- Set worker_kind as a plain string class attribute (NOT a WorkerKind enum)\n"
+            "- Implement execute(task, context) returning a dict matching WebSearchOutput\n"
+            "- Use try/except for error handling\n"
+            "- Emit status with: self._emit_status(context, '...')\n"
+            "- For LLM calls: reply, source = self.llm_router.call(prompt=..., system=...)\n"
+            "- For file I/O: use pathlib.Path\n"
+            "- Allowed imports: os, pathlib, json, urllib, datetime, re, io (stdlib only)\n"
+            "- DO NOT import requests, httpx, or any third-party library\n"
+            "- Return ONLY valid Python code, no markdown fences, no explanation\n\n"
+            "## Output dict schema (WebSearchOutput):\n"
+            "  query: str, evidence: list (can be []), assistant_reply: str, "
+            "response_source: str, synthesis: str\n\n"
+            "## Template:\n"
+            "from __future__ import annotations\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "from typing import Any\n"
+            "from beekeeper.worker import ForgedWorker\n"
+            "from beekeeper.contracts import TaskEnvelope, WorkerContext, WebSearchOutput\n\n"
+            "class {ClassName}(ForgedWorker):\n"
+            "    worker_kind = '{worker_kind_str}'\n"
+            "    def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:\n"
+            "        ...\n"
+            "        return WebSearchOutput(...).model_dump(mode='json')\n"
+        )
+
+        user_prompt = (
+            f"Generate a worker class for intent: {intent}\n"
+            f"Worker kind string: \"{worker_kind_str}\"\n"
+            f"Class name: {class_name}\n"
+            f"Task description: {query}\n"
+            f"Payload keys available: {payload_keys}\n\n"
+            "Return ONLY the Python code."
+        )
+        if build_context:
+            user_prompt += f"\n\nTechnical specification:\n{build_context}"
+
+        reply, _source = self.worker_runtime.direct_chat(
+            query=user_prompt,
+            system=system_prompt,
+        )
+        if not reply or not reply.strip():
+            raise ValueError("LLM returned empty response for worker code generation")
+
+        # Strip markdown fences if LLM included them
+        code = reply.strip()
+        if code.startswith("```"):
+            lines = code.splitlines()
+            code = "\n".join(
+                line for line in lines[1:]
+                if not line.strip().startswith("```")
+            ).strip()
+
+        # Validate: must compile cleanly
+        compile(code, f"<generated:{worker_kind_str}>", "exec")
+
+        # Validate: must contain a ForgedWorker subclass
+        import ast as _ast
+        try:
+            tree = _ast.parse(code)
+        except SyntaxError as exc:
+            raise ValueError(f"Generated code has syntax error: {exc}") from exc
+        class_defs = [node for node in _ast.walk(tree) if isinstance(node, _ast.ClassDef)]
+        has_forged_worker = any(
+            any(
+                (isinstance(base, _ast.Name) and base.id == "ForgedWorker")
+                or (isinstance(base, _ast.Attribute) and base.attr == "ForgedWorker")
+                for base in cls.bases
+            )
+            for cls in class_defs
+        )
+        if not has_forged_worker:
+            raise ValueError("Generated code does not contain a ForgedWorker subclass")
+        return code
+
+    def _ensure_worker_plugin(self, worker_kind_str: str, intent: str, name: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        root = Path(self.config.honeycomb_root)
+        generated_dir = root / "workers" / "generated"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        class_name = self._worker_class_name(worker_kind_str)
+        plugin_path = generated_dir / f"{worker_kind_str}.py"
+        created_file = False
+        build_context = ""
+        if not plugin_path.exists():
+            build_context = self._gather_worker_build_context(intent, payload or {})
+            try:
+                plugin_source = self._generate_worker_source_via_llm(
+                    worker_kind_str, class_name, intent, name, payload or {},
+                    build_context=build_context,
+                )
+            except Exception:
+                plugin_source = self._build_forged_worker_source(worker_kind_str, class_name, intent, name)
+                build_context = ""
+            plugin_path.write_text(plugin_source, encoding="utf-8")
+            created_file = True
+        plugins_path = root / "workers" / "plugins.json"
+        plugins_path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {"workers": []}
+        if plugins_path.exists():
+            try:
+                loaded = json.loads(plugins_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (json.JSONDecodeError, OSError):
+                data = {"workers": []}
+        workers = data.get("workers")
+        if not isinstance(workers, list):
+            workers = []
+        module_path = str(Path("workers") / "generated" / f"{worker_kind_str}.py")
+        existing = next(
+            (
+                entry for entry in workers
+                if isinstance(entry, dict)
+                and str(entry.get("worker_kind", "")).strip() == worker_kind_str
+            ),
+            None,
+        )
+        created_plugin_entry = False
+        if existing is None:
+            workers.append(
+                {
+                    "worker_kind": worker_kind_str,
+                    "module_path": module_path,
+                    "class_name": class_name,
+                }
+            )
+            created_plugin_entry = True
+        data["workers"] = workers
+        plugins_path.write_text(json.dumps(data, indent=2, ensure_ascii=True), encoding="utf-8")
+        return {
+            "plugin_file_created": created_file,
+            "plugin_file_path": str(plugin_path),
+            "plugin_entry_created": created_plugin_entry,
+            "plugin_class_name": class_name,
+            "plugin_module_path": module_path,
+            "build_context": build_context,
+        }
+
+    def _test_generated_worker(
+        self, worker_kind_str: str, intent: str, payload: dict[str, Any]
+    ) -> tuple[bool, str | None]:
+        """Run the newly generated worker against the current payload.
+        Returns (True, None) on success, (False, error_string) on failure.
+        Uses an isolated test trace ID so it does not pollute the main trace.
+        """
+        try:
+            test_trace_id = f"test-{uuid4().hex[:12]}"
+            test_payload = {k: v for k, v in payload.items() if not k.startswith("_")}
+            test_payload["_runtime_worker_key"] = worker_kind_str
+            test_task = TaskEnvelope(
+                queen_trace_id=test_trace_id,
+                queen_request_id=test_trace_id,
+                task_type=intent,
+                worker_kind=WorkerKind.forged,
+                payload=test_payload,
+                required_skills=["custom"],
+                budget_usd=0.5,
+                max_retries=0,
+                idempotency_key=test_trace_id,
+                status=Status.queued,
+            )
+            context = self._build_worker_context(test_task)
+            result = self.worker_runtime.run_once(test_task, context)
+            if result.status == Status.success:
+                return True, None
+            error_msg = str(result.output.get("error", "worker returned non-success status"))
+            return False, error_msg
+        except Exception as exc:
+            return False, str(exc)
+
+    def _fix_worker_code(
+        self,
+        worker_kind_str: str,
+        class_name: str,
+        intent: str,
+        name: str,
+        payload: dict[str, Any],
+        previous_code: str,
+        error_msg: str,
+        build_context: str = "",
+    ) -> str:
+        """Ask the LLM to fix broken generated worker code.
+        Returns fixed Python source. Raises on failure so the retry loop can catch it.
+        """
+        query = str(payload.get("query") or payload.get("topic") or intent)
+        system_prompt = (
+            "You are a Python debugging expert for the Beekeeper autonomous agent platform.\n"
+            "You will receive broken worker code and the error it produced.\n"
+            "Fix the code so it runs correctly.\n\n"
+            "## Rules\n"
+            "- Keep ForgedWorker inheritance and worker_kind class attribute\n"
+            "- Fix the execute(task, context) method to return a valid WebSearchOutput dict\n"
+            "- Use try/except for error handling\n"
+            "- Allowed imports: os, pathlib, json, urllib, datetime, re, io (stdlib only)\n"
+            "- DO NOT import requests, httpx, or any third-party library\n"
+            "- Return ONLY the complete fixed Python code, no markdown fences, no explanation\n"
+        )
+        user_prompt = (
+            f"Intent: {intent}\n"
+            f"Worker kind: {worker_kind_str}\n"
+            f"Class name: {class_name}\n"
+            f"Task description: {query}\n\n"
+            f"Error encountered:\n{error_msg}\n\n"
+            f"Broken code:\n{previous_code}\n\n"
+            "Return ONLY the fixed Python code."
+        )
+        if build_context:
+            user_prompt += f"\n\nTechnical specification:\n{build_context}"
+
+        reply, _source = self.worker_runtime.direct_chat(
+            query=user_prompt,
+            system=system_prompt,
+        )
+        if not reply or not reply.strip():
+            raise ValueError("LLM returned empty response for worker fix")
+
+        code = reply.strip()
+        if code.startswith("```"):
+            lines = code.splitlines()
+            code = "\n".join(
+                line for line in lines[1:]
+                if not line.strip().startswith("```")
+            ).strip()
+
+        compile(code, f"<fixed:{worker_kind_str}>", "exec")
+
+        import ast as _ast
+        try:
+            tree = _ast.parse(code)
+        except SyntaxError as exc:
+            raise ValueError(f"Fixed code has syntax error: {exc}") from exc
+        class_defs = [node for node in _ast.walk(tree) if isinstance(node, _ast.ClassDef)]
+        has_forged_worker = any(
+            any(
+                (isinstance(base, _ast.Name) and base.id == "ForgedWorker")
+                or (isinstance(base, _ast.Attribute) and base.attr == "ForgedWorker")
+                for base in cls.bases
+            )
+            for cls in class_defs
+        )
+        if not has_forged_worker:
+            raise ValueError("Fixed code does not contain a ForgedWorker subclass")
+        return code
+
     def _auto_spawn_worker(self, intent: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Register a new custom worker blueprint when no content match exists for this intent.
         The spawned worker uses ForgedWorker (LLM) for execution but is persisted to the registry
@@ -641,23 +1021,90 @@ class QueenAgent:
                 is_template=False,
             )
         )
+        plugin = self._ensure_worker_plugin(worker_kind_str, intent=intent, name=name, payload=payload)
+        self.worker_runtime.reload_plugins(self.config.honeycomb_root)
+        self.worker_registry.reload()
+
+        MAX_FIX_ATTEMPTS = 2
+        plugin_path = Path(self.config.honeycomb_root) / "workers" / "generated" / f"{worker_kind_str}.py"
+        build_context = plugin.get("build_context", "")
+        class_name = self._worker_class_name(worker_kind_str)
+
+        test_ok, test_error = self._test_generated_worker(worker_kind_str, intent, payload)
+        if test_ok:
+            payload["_runtime_worker_key"] = worker_kind_str
+            return {
+                "worker_kind": worker_kind_str,
+                "created": True,
+                "verified": True,
+                "keywords": keywords,
+                "fallback_workers": fallback_workers,
+                **plugin,
+            }
+
+        current_code = plugin_path.read_text(encoding="utf-8")
+        for attempt in range(MAX_FIX_ATTEMPTS):
+            try:
+                fixed = self._fix_worker_code(
+                    worker_kind_str, class_name, intent, name, payload,
+                    previous_code=current_code, error_msg=test_error or "unknown",
+                    build_context=build_context,
+                )
+                plugin_path.write_text(fixed, encoding="utf-8")
+                self.worker_runtime.reload_plugins(self.config.honeycomb_root)
+                self.worker_registry.reload()
+                test_ok, test_error = self._test_generated_worker(worker_kind_str, intent, payload)
+                if test_ok:
+                    payload["_runtime_worker_key"] = worker_kind_str
+                    return {
+                        "worker_kind": worker_kind_str,
+                        "created": True,
+                        "verified": True,
+                        "fix_attempts": attempt + 1,
+                        "keywords": keywords,
+                        "fallback_workers": fallback_workers,
+                        **plugin,
+                    }
+                current_code = fixed
+            except Exception as fix_exc:
+                test_error = str(fix_exc)
+
+        # All retries exhausted — write static fallback
+        static = self._build_forged_worker_source(worker_kind_str, class_name, intent, name)
+        plugin_path.write_text(static, encoding="utf-8")
+        self.worker_runtime.reload_plugins(self.config.honeycomb_root)
+        self.worker_registry.reload()
         return {
             "worker_kind": worker_kind_str,
             "created": True,
+            "verified": False,
+            "forge_error": test_error,
             "keywords": keywords,
             "fallback_workers": fallback_workers,
+            **plugin,
         }
 
     def _route_worker_kind(self, intent: str, payload: dict[str, Any], trace_id: str | None = None) -> WorkerKind:
         if intent == "context_curation":
             return WorkerKind.context_curator
         query = str(payload.get("query") or payload.get("topic") or "").strip()
-        worker_kind, _fallbacks, best_score, content_score = self.worker_registry.select_worker_with_metadata(
-            intent, payload, query
-        )
+        details = self.worker_registry.select_worker_details(intent, payload, query)
+        worker_kind = details["worker_kind"]
+        best_score = details["best_score"]
+        content_score = details["content_score"]
+        worker_kind_str = details["worker_kind_str"]
+        if worker_kind == WorkerKind.custom and worker_kind_str:
+            payload["_runtime_worker_key"] = worker_kind_str
         if content_score == 0:
             # No intent/payload/keyword matched — auto-spawn a worker for this intent and use ForgedWorker now
-            spawn = self._auto_spawn_worker(intent, payload)
+            try:
+                spawn = self._auto_spawn_worker(intent, payload)
+            except Exception as exc:
+                spawn = {
+                    "worker_kind": self._normalize_worker_kind(intent),
+                    "created": False,
+                    "forge_error": str(exc),
+                }
             if trace_id:
                 self.honeycomb.write_event(
                     trace_id,
@@ -669,6 +1116,8 @@ class QueenAgent:
                         **spawn,
                     },
                 )
+            if spawn.get("verified") and spawn.get("worker_kind"):
+                payload["_runtime_worker_key"] = spawn["worker_kind"]
             return WorkerKind.forged
         feedback = self.honeycomb.read_routing_feedback()
         if feedback and worker_kind in {WorkerKind.web_search, WorkerKind.heavy_compute}:
@@ -932,6 +1381,63 @@ class QueenAgent:
         # Unknown scheduler values should not break execution.
         return self.worker_runtime.run_once(task, context, parent_span_id=parent_span_id)
 
+    def _run_tool_loop(
+        self,
+        queen_trace_id: str,
+        payload: dict[str, Any],
+        status_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any] | None:
+        """Run the model-driven tool loop. Returns result dict for run() or None on failure/fallback."""
+        if self._tool_loop_engine is None or self._tool_registry is None or self._llm_router is None:
+            return None
+        query = str(payload.get("query") or payload.get("topic") or "").strip()
+        if not query:
+            return None
+        prior = payload.get("messages") or []
+        initial_messages: list[dict[str, Any]] = []
+        for m in prior[:20]:
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant", "system"):
+                initial_messages.append({"role": m.get("role", "user"), "content": m.get("content", "") or ""})
+        initial_messages.append({"role": "user", "content": query})
+
+        model_override = (payload.get("model_override") or "").strip() or None
+
+        def decision_fn(messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]]) -> dict[str, Any]:
+            decision = self._llm_router.call_with_tools(
+                messages,
+                tool_schemas,
+                model_override=model_override,
+            )
+            return {
+                "tool_calls": [{"name": tc.get("name"), "arguments": tc.get("arguments", {})} for tc in (decision.tool_calls or [])],
+                "final_text": decision.final_text,
+                "error": decision.error,
+            }
+
+        if status_callback:
+            try:
+                status_callback("Running model-driven tool loop…")
+            except Exception:
+                pass
+        context = {"trace_id": queen_trace_id, "status_callback": status_callback}
+        final = self._tool_loop_engine.run(
+            queen_trace_id,
+            initial_messages,
+            decision_fn=decision_fn,
+            context=context,
+        )
+        self.honeycomb.write_event(
+            queen_trace_id,
+            {"kind": "tool_loop_complete", "status": final.status, "step_count": final.step_count},
+        )
+        return {
+            "final_text": final.final_text,
+            "tool_trace": final.tool_trace,
+            "cost_metrics": final.cost_metrics.model_dump(mode="json"),
+            "status": final.status,
+            "step_count": final.step_count,
+        }
+
     def _should_delegate_to_workers(self, payload: dict[str, Any]) -> bool:
         """False = Queen responds directly (Ollama only). True = delegate to workers."""
         if payload.get("delegate_to_worker") is True:
@@ -1076,6 +1582,35 @@ class QueenAgent:
                         "trace_events": self.tracer.events,
                         "semantic_hits_for_intent": self.honeycomb.semantic_search(intent),
                     }
+            if self.config.execution_mode in ("model_tools", "hybrid"):
+                tool_result = self._run_tool_loop(queen_trace_id, payload, status_callback)
+                if tool_result is not None:
+                    if self.config.execution_mode == "model_tools" or tool_result.get("status") == "success":
+                        cost = tool_result.get("cost_metrics") or {}
+                        return {
+                            "trace_id": queen_trace_id,
+                            "request_id": queen_request_id,
+                            "queen_soul_profile_id": self.queen_soul.soul_profile_id,
+                            "ollama_base_url": self.config.ollama_base_url,
+                            "results": [
+                                {
+                                    "task_id": str(uuid4()),
+                                    "agent_id": "queen-tool-loop",
+                                    "worker_kind": WorkerKind.custom.value,
+                                    "status": Status.success.value,
+                                    "confidence": 0.9,
+                                    "output": {
+                                        "assistant_reply": tool_result.get("final_text", ""),
+                                        "tool_trace": tool_result.get("tool_trace", []),
+                                        "synthesis": "Model-driven tool loop.",
+                                    },
+                                    "cost_metrics": cost,
+                                    "output_schema": "QueenToolLoopOutput",
+                                }
+                            ],
+                            "trace_events": self.tracer.events,
+                            "semantic_hits_for_intent": self.honeycomb.semantic_search(intent),
+                        }
             if not self._should_delegate_to_workers(payload):
                 query = str(payload.get("query") or payload.get("topic") or intent).strip()
                 if query:

@@ -23,6 +23,7 @@ from .contracts import (
     ContextCuratorOutput,
     CuratedMemoryItem,
     CostMetrics,
+    FileOperationOutput,
     GuardrailProfile,
     HeavyComputeOutput,
     ResultEnvelope,
@@ -338,19 +339,109 @@ class ForgedWorker(BaseSpecialistWorker):
             openai_timeout_seconds=openai_timeout_seconds,
         )
 
+    _ACTION_SYSTEM = (
+        "You are an autonomous agent that can perform real OS actions.\n"
+        "Analyse the user request and respond with a JSON object (no markdown fences).\n\n"
+        "Supported actions:\n"
+        '  {"action":"write_file","path":"<relative or absolute path>","content":"<file content>"}\n'
+        '  {"action":"append_file","path":"<path>","content":"<text to append>"}\n'
+        '  {"action":"delete_file","path":"<path>"}\n'
+        '  {"action":"make_dir","path":"<directory path>"}\n'
+        '  {"action":"answer","reply":"<plain text answer>"}\n\n'
+        "Rules:\n"
+        "- Use write_file / append_file / delete_file / make_dir ONLY when the user explicitly asks to create, write, append, delete, or make a file/directory.\n"
+        "- Use answer for everything else (research, explain, summarise, etc.).\n"
+        "- Paths are relative to the current working directory unless the user specifies an absolute path.\n"
+        "- Return ONLY the JSON object, nothing else.\n"
+    )
+
+    def _parse_action(self, raw: str) -> dict[str, Any]:
+        """Strip markdown fences and parse the JSON action from the LLM reply."""
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(l for l in lines[1:] if not l.strip().startswith("```")).strip()
+        # Find first { … } block
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            text = text[start:end]
+        return json.loads(text)
+
+    def _execute_action(self, action: dict[str, Any]) -> tuple[str, list[str]]:
+        """Run the parsed action. Returns (human summary, list of evidence strings)."""
+        kind = str(action.get("action", "answer")).strip().lower()
+        evidence: list[str] = []
+
+        if kind == "write_file":
+            path = Path(str(action["path"])).expanduser()
+            content = str(action.get("content", ""))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            summary = f"Created file: {path} ({len(content)} chars)"
+            evidence.append(f"wrote:{path}")
+
+        elif kind == "append_file":
+            path = Path(str(action["path"])).expanduser()
+            content = str(action.get("content", ""))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(content)
+            summary = f"Appended to file: {path} ({len(content)} chars)"
+            evidence.append(f"appended:{path}")
+
+        elif kind == "delete_file":
+            path = Path(str(action["path"])).expanduser()
+            if path.exists():
+                path.unlink()
+                summary = f"Deleted file: {path}"
+                evidence.append(f"deleted:{path}")
+            else:
+                summary = f"File not found (nothing deleted): {path}"
+
+        elif kind == "make_dir":
+            path = Path(str(action["path"])).expanduser()
+            path.mkdir(parents=True, exist_ok=True)
+            summary = f"Created directory: {path}"
+            evidence.append(f"mkdir:{path}")
+
+        else:  # answer / unknown
+            summary = str(action.get("reply", ""))
+
+        return summary, evidence
+
     def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
-        self._emit_status(context, "Processing with LLM (no matching worker)…")
+        self._emit_status(context, "Planning action…")
         query = str(task.payload.get("query") or task.payload.get("topic") or task.task_type).strip()
         prior = task.payload.get("messages") or []
         messages = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in prior if isinstance(m, dict)]
-        user_system = _build_user_context_system(task.payload)
-        reply, source = self.llm_router.call(prompt=query, system=user_system, messages=messages or None)
+
+        # Step 1: ask LLM what action to take (structured JSON)
+        raw_action, source = self.llm_router.call(
+            prompt=query,
+            system=self._ACTION_SYSTEM,
+            messages=messages or None,
+        )
+
+        # Step 2: try to parse and execute the action
+        action_summary = raw_action or ""
+        evidence: list[str] = []
+        if raw_action:
+            try:
+                action = self._parse_action(raw_action)
+                self._emit_status(context, f"Executing action: {action.get('action', '?')}…")
+                action_summary, evidence = self._execute_action(action)
+            except Exception as exc:
+                # JSON parse failed or action failed — fall back to treating raw reply as plain text
+                action_summary = raw_action
+                evidence = [f"action_error:{exc}"]
+
         return WebSearchOutput(
             query=query,
             evidence=[],
-            assistant_reply=reply or "I could not process this request.",
+            assistant_reply=action_summary or "I could not process this request.",
             response_source=source,
-            synthesis="Forged worker (LLM direct).",
+            synthesis=f"ForgedWorker executed. evidence={evidence}",
         ).model_dump(mode="json")
 
 
@@ -433,6 +524,67 @@ class ContextCuratorWorker(BaseSpecialistWorker):
             items=items,
             notes=f"Context curation completed. skipped_sensitive={skipped_sensitive}",
         ).model_dump(mode="json")
+
+
+class FileWorker(BaseSpecialistWorker):
+    """Reads and writes files on the local filesystem. Used by Queen to save reports, data, and artifacts."""
+    worker_kind = WorkerKind.file_system
+    output_model = FileOperationOutput
+
+    def execute(self, task: TaskEnvelope, context: WorkerContext) -> dict[str, Any]:
+        operation = str(task.payload.get("operation", "write")).lower()
+        raw_path = str(task.payload.get("file_path") or task.payload.get("path") or "").strip()
+        content = str(task.payload.get("content") or task.payload.get("text") or "")
+        base_dir = str(task.payload.get("base_dir") or os.getcwd())
+
+        if not raw_path:
+            return FileOperationOutput(
+                operation=operation, file_path="", success=False,
+                notes="No file_path provided in payload."
+            ).model_dump(mode="json")
+
+        path = Path(raw_path) if Path(raw_path).is_absolute() else Path(base_dir) / raw_path
+
+        try:
+            if operation in ("write", "append"):
+                self._emit_status(context, f"Writing to {path}…")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if operation == "append":
+                    with open(path, "a", encoding="utf-8") as f:
+                        f.write(content)
+                else:
+                    path.write_text(content, encoding="utf-8")
+                return FileOperationOutput(
+                    operation=operation, file_path=str(path), success=True,
+                    bytes_written=len(content.encode()),
+                    content_preview=content[:200],
+                    notes=f"Wrote {len(content)} chars to {path}",
+                ).model_dump(mode="json")
+            elif operation == "read":
+                self._emit_status(context, f"Reading {path}…")
+                text = path.read_text(encoding="utf-8")
+                return FileOperationOutput(
+                    operation="read", file_path=str(path), success=True,
+                    content_preview=text[:500],
+                    notes=f"Read {len(text)} chars",
+                ).model_dump(mode="json")
+            elif operation == "mkdir":
+                self._emit_status(context, f"Creating directory {path}…")
+                path.mkdir(parents=True, exist_ok=True)
+                return FileOperationOutput(
+                    operation="mkdir", file_path=str(path), success=True,
+                    notes=f"Created directory {path}",
+                ).model_dump(mode="json")
+            else:
+                return FileOperationOutput(
+                    operation=operation, file_path=str(path), success=False,
+                    notes=f"Unknown operation: {operation}",
+                ).model_dump(mode="json")
+        except Exception as exc:
+            return FileOperationOutput(
+                operation=operation, file_path=str(path), success=False,
+                notes=str(exc)[:300],
+            ).model_dump(mode="json")
 
 
 class AuditWorker(BaseSpecialistWorker):
@@ -519,6 +671,7 @@ class WorkerRuntime:
             WorkerKind.heavy_compute: HeavyComputeWorker(),
             WorkerKind.audit: AuditWorker(),
             WorkerKind.context_curator: ContextCuratorWorker(),
+            WorkerKind.file_system: FileWorker(),
             WorkerKind.forged: ForgedWorker(
                 llm_providers=llm_providers,
                 ollama_base_url=ollama_base_url,
@@ -573,11 +726,12 @@ class WorkerRuntime:
         ):
             task.status = Status.running
             self.honeycomb.write_task(task)
-            worker_key = (
-                task.task_type
-                if task.task_type.startswith("forged_") and task.task_type in self._workers
-                else task.worker_kind
-            )
+            runtime_worker_key = str(task.payload.get("_runtime_worker_key", "")).strip()
+            worker_key = task.worker_kind
+            if runtime_worker_key and runtime_worker_key in self._workers:
+                worker_key = runtime_worker_key
+            elif task.task_type.startswith("forged_") and task.task_type in self._workers:
+                worker_key = task.task_type
             worker = self._workers.get(worker_key) or self._workers[WorkerKind.forged]
             self.honeycomb.write_event(
                 task.queen_trace_id,
