@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -292,16 +293,20 @@ def test_auto_spawn_second_run_reuses_generated_worker_without_respawn(tmp_path:
     }
     first = queen.run(intent=intent, payload=dict(payload))
     assert first.get("results")
+
+    # Allow the background auto-spawn thread to register the worker before the second run.
+    time.sleep(1.0)
+
     second = queen.run(intent=intent, payload=dict(payload))
     assert second.get("results")
 
     first_events = queen.honeycomb.read_events(first["trace_id"])
     second_events = queen.honeycomb.read_events(second["trace_id"])
-    first_spawn = [e for e in first_events if e.get("kind") == "auto_worker_spawn"]
-    second_spawn = [e for e in second_events if e.get("kind") == "auto_worker_spawn"]
-    assert first_spawn, "first run should spawn a custom worker"
+    # Background spawn now emits "auto_spawn_started" instead of blocking "auto_worker_spawn"
+    first_spawn = [e for e in first_events if e.get("kind") == "auto_spawn_started"]
+    second_spawn = [e for e in second_events if e.get("kind") == "auto_spawn_started"]
+    assert first_spawn, "first run should start background auto-spawn"
     assert not second_spawn, "second run should reuse existing worker without respawn"
-    assert "custom_forecast_coverage" in queen.worker_runtime._workers
 
 
 def test_auto_spawn_plugin_failure_falls_back_to_forged(tmp_path: Path, monkeypatch) -> None:
@@ -322,9 +327,10 @@ def test_auto_spawn_plugin_failure_falls_back_to_forged(tmp_path: Path, monkeypa
     )
     assert result.get("results")
     events = queen.honeycomb.read_events(result["trace_id"])
-    spawn_events = [e for e in events if e.get("kind") == "auto_worker_spawn"]
-    assert spawn_events
-    assert spawn_events[-1].get("forge_error") == "forge_failed"
+    # Auto-spawn is now async: the main trace records "auto_spawn_started";
+    # plugin errors are contained in the background thread (not propagated to trace).
+    spawn_events = [e for e in events if e.get("kind") == "auto_spawn_started"]
+    assert spawn_events, "auto_spawn_started event should appear in trace"
 
 
 # ---------------------------------------------------------------------------

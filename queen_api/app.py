@@ -32,6 +32,17 @@ _load_env()
 
 app = FastAPI(title="Queen API", version="0.1.0", description="OpenAI-compatible adapter for Beekeeper Queen agent")
 
+# Module-level QueenAgent cache keyed on (honeycomb_root, execution_mode, scheduler_backend).
+# Avoids 500ms–2s of expensive init ops (registry loads, Qdrant connect, etc.) per request.
+_queen_cache: dict[str, QueenAgent] = {}
+
+
+def _get_queen(config: QueenConfig) -> QueenAgent:
+    key = f"{config.honeycomb_root}|{config.execution_mode}|{config.scheduler_backend}"
+    if key not in _queen_cache:
+        _queen_cache[key] = QueenAgent(config)
+    return _queen_cache[key]
+
 QUEEN_MODEL_ID = "beekeeper-queen"
 
 
@@ -80,7 +91,7 @@ def _enqueue_context_curation(
     def _run() -> None:
         try:
             config = _get_queen_config()
-            queen = QueenAgent(config)
+            queen = _get_queen(config)
             payload: dict[str, str | bool] = {
                 "user_msg": query[:1200],
                 "assistant_reply": reply[:3000],
@@ -228,7 +239,7 @@ def chat_completions(
 
     log_service_call("queen_api", "called", source="queen_api", user_id=user_id, resource="queen:chat")
     config = _get_queen_config(execution_mode=(x_beekeeper_execution_mode or "").strip() or None)
-    queen = QueenAgent(config)
+    queen = _get_queen(config)
     result = queen.run(intent=intent, payload=payload, source="queen_api")
     log_service_call(
         "queen",
@@ -333,7 +344,7 @@ def run_actions(request: ActionsRequest):
     }
     log_service_call("queen_api", "called", source="queen_api:actions", resource="queen:actions")
     config = _get_queen_config()
-    queen = QueenAgent(config)
+    queen = _get_queen(config)
     result = queen.run(intent=request.intent, payload=payload, source="queen_api")
     log_service_call("queen", "completed", source="queen_api", resource="queen:actions", trace_id=result.get("trace_id"))
     return {
@@ -427,6 +438,210 @@ def write_memory(request: MemoryWriteRequest):
         tags=request.tags,
     )
     return {"ok": True, "memory_id": memory_id}
+
+
+# ---------------------------------------------------------------------------
+# Policy endpoints — per-user autonomy policy (no auth in queen_api, user_id via header)
+# ---------------------------------------------------------------------------
+
+class PolicyUpdateRequest(BaseModel):
+    always_allow: list[str] | None = None
+    always_ask: list[str] | None = None
+    always_deny: list[str] | None = None
+    max_auto_cost_usd: float | None = None
+
+
+@app.get("/v1/policy")
+def get_policy(x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id")):
+    """Get autonomy policy for a user (identified by X-Beekeeper-User-Id header)."""
+    from beekeeper.user_policy import load_user_policy
+
+    user_id = (x_beekeeper_user_id or "").strip() or "default"
+    store_root = os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")
+    policy = load_user_policy(store_root, user_id)
+    return {"policy": policy.model_dump(mode="json"), "user_id": user_id}
+
+
+@app.put("/v1/policy")
+def update_policy(
+    request: PolicyUpdateRequest,
+    x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id"),
+):
+    """Update autonomy policy for a user."""
+    from beekeeper.user_policy import load_user_policy, save_user_policy
+
+    user_id = (x_beekeeper_user_id or "").strip() or "default"
+    store_root = os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")
+    policy = load_user_policy(store_root, user_id)
+    if request.always_allow is not None:
+        policy.always_allow = request.always_allow
+    if request.always_ask is not None:
+        policy.always_ask = request.always_ask
+    if request.always_deny is not None:
+        policy.always_deny = request.always_deny
+    if request.max_auto_cost_usd is not None:
+        policy.max_auto_cost_usd = request.max_auto_cost_usd
+    save_user_policy(store_root, user_id, policy)
+    return {"ok": True, "policy": policy.model_dump(mode="json"), "user_id": user_id}
+
+
+# ---------------------------------------------------------------------------
+# Workers catalog — list all workers with generation status
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/workers")
+def list_workers():
+    """List all registered workers (built-in + custom + generated)."""
+    from beekeeper.worker_registry import WorkerRegistry
+
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
+    registry = WorkerRegistry(honeycomb_root)
+    all_workers = registry.list_workers()
+    generated_dir = honeycomb_root / "workers" / "generated"
+    generated_kinds: set[str] = set()
+    if generated_dir.exists():
+        for f in generated_dir.glob("*.py"):
+            generated_kinds.add(f.stem)
+    enriched = []
+    for w in all_workers:
+        entry = dict(w)
+        kind = entry.get("worker_kind", "")
+        entry["is_generated"] = kind in generated_kinds
+        enriched.append(entry)
+    return {
+        "workers": enriched,
+        "total": len(enriched),
+        "generated_count": len(generated_kinds),
+        "default_worker": registry.get_default_worker().value,
+    }
+
+
+# ---------------------------------------------------------------------------
+# HITL reviews — list, approve, deny pending human reviews
+# ---------------------------------------------------------------------------
+
+class ReviewActionRequest(BaseModel):
+    approver: str = "operator"
+    note: str | None = None
+
+
+@app.get("/v1/reviews")
+def list_reviews(x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id")):
+    """List pending HITL review requests."""
+    from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
+    store = HoneycombStore(
+        HoneycombConfig(
+            root_dir=honeycomb_root,
+            vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
+            vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+            vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
+        )
+    )
+    pending = store.list_pending_reviews()
+    return {
+        "pending_count": len(pending),
+        "reviews": [r.model_dump(mode="json") for r in pending],
+    }
+
+
+@app.post("/v1/reviews/{review_id}/approve")
+def approve_review(
+    review_id: str,
+    request: ReviewActionRequest = ReviewActionRequest(),
+    x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id"),
+):
+    """Approve a pending HITL review."""
+    from fastapi import HTTPException
+
+    from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
+    store = HoneycombStore(
+        HoneycombConfig(
+            root_dir=honeycomb_root,
+            vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
+            vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+            vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
+        )
+    )
+    review = store.get_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="review_not_found")
+    if review.status != "pending":
+        return {"review": review.model_dump(mode="json"), "resumed": False}
+    approver = (x_beekeeper_user_id or "").strip() or request.approver or "operator"
+    config = _get_queen_config()
+    queen = _get_queen(config)
+    result = queen.resume_human_review(
+        review_id,
+        approver=approver,
+        approved=True,
+        note=request.note or "",
+    )
+    resolved = store.get_review(review_id)
+    return {
+        "review": resolved.model_dump(mode="json") if resolved else {},
+        "resumed": result.get("resumed", False),
+    }
+
+
+@app.post("/v1/reviews/{review_id}/deny")
+def deny_review(
+    review_id: str,
+    request: ReviewActionRequest = ReviewActionRequest(),
+    x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id"),
+):
+    """Deny a pending HITL review."""
+    from fastapi import HTTPException
+
+    from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
+    store = HoneycombStore(
+        HoneycombConfig(
+            root_dir=honeycomb_root,
+            vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
+            vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+            vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
+        )
+    )
+    review = store.get_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="review_not_found")
+    if review.status != "pending":
+        return {"review": review.model_dump(mode="json")}
+    approver = (x_beekeeper_user_id or "").strip() or request.approver or "operator"
+    resolved = store.resolve_review(
+        review_id,
+        approved=False,
+        approver=approver,
+        note=request.note,
+    )
+    return {"review": resolved.model_dump(mode="json")}
+
+
+# ---------------------------------------------------------------------------
+# Work history — recent trace summaries
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/history")
+def get_history(limit: int = 20):
+    """Return recent Queen trace summaries."""
+    from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+
+    honeycomb_root = Path(os.getenv("BEEKEEPER_HONEYCOMB_ROOT", ".honeycomb"))
+    store = HoneycombStore(
+        HoneycombConfig(
+            root_dir=honeycomb_root,
+            vector_backend=os.getenv("BEEKEEPER_VECTOR_BACKEND", "qdrant"),
+            vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
+            vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
+        )
+    )
+    summaries = store.list_recent_traces(limit=max(1, min(limit, 100)))
+    return {"history": summaries, "count": len(summaries)}
 
 
 def main() -> None:
