@@ -32,12 +32,11 @@ class WorkerKind(str, Enum):
     web_search = "web_search"
     heavy_compute = "heavy_compute"
     audit = "audit"
-    monitor = "monitor"
-    logger = "logger"
     custom = "custom"
     forged = "forged"
     context_curator = "context_curator"
     file_system = "file_system"
+    bash = "bash"
 
 
 class ProfileType(str, Enum):
@@ -330,6 +329,20 @@ class FileOperationOutput(BaseModel):
     bytes_written: int = 0
     content_preview: str = ""
     notes: str = ""
+
+
+class BashWorkerOutput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    success: bool
+    command: str
+    stdout: str = ""
+    stderr: str = ""
+    returncode: int = -1
+    working_dir: str = ""
+    assistant_reply: str
+    response_source: str = "payload"
+    error: str | None = None
 
 
 class TaskEnvelope(BaseModel):

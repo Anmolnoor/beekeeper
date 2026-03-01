@@ -457,7 +457,12 @@ def _permission_rule_match(rule: dict[str, Any], tool: str, target: str) -> bool
     pattern = str(rule.get("pattern", "*"))
     if not target:
         return True
-    return fnmatch.fnmatch(target, pattern)
+    if fnmatch.fnmatch(target, pattern):
+        return True
+    # "**/" prefix means "any depth including root" — also try without the leading **/ segment
+    if pattern.startswith("**/"):
+        return fnmatch.fnmatch(target, pattern[3:])
+    return False
 
 
 def _permission_simulate(
@@ -1543,7 +1548,7 @@ def send_chat_message(
     prior = [{"role": m["role"], "content": m["content"]} for m in chat.get("messages", [])]
     store.append_chat_message(chat_id, "user", content)
     memories = [{"content": m["content"]} for m in store.search_user_memories(user.user_id, query=content, limit=18)]
-    payload = {"query": content, "messages": prior, "user_memories": memories, "delegate_to_worker": True, "use_web_search": True}
+    payload = {"query": content, "messages": prior, "user_memories": memories, "delegate_to_worker": True, "use_web_search": True, "user_id": user.user_id}
     log_service_call(
         "beekeeper_api",
         "called",
@@ -1615,7 +1620,7 @@ async def send_chat_message_stream(
     prior = [{"role": m["role"], "content": m["content"]} for m in chat.get("messages", [])]
     store.append_chat_message(chat_id, "user", content)
     memories = [{"content": m["content"]} for m in store.search_user_memories(user.user_id, query=content, limit=18)]
-    payload = {"query": content, "messages": prior, "user_memories": memories}
+    payload = {"query": content, "messages": prior, "user_memories": memories, "user_id": user.user_id}
 
     status_queue: queue.Queue[str | None] = queue.Queue()
     result_holder: list[dict[str, Any]] = []
@@ -2254,9 +2259,282 @@ def get_audit_logs(
 
 
 @router.get("/api/stream/events")
-def stream_events() -> StreamingResponse:
-    # Lightweight demo stream for dashboard cards and live health chips.
-    def _iter() -> Any:
-        yield "event: ready\ndata: {\"status\":\"connected\"}\n\n"
+def stream_events(trace_id: str | None = None) -> StreamingResponse:
+    """Live SSE stream of honeycomb events. Optional trace_id filter."""
+    from beekeeper.honeycomb import _event_bus, _event_bus_lock
 
-    return StreamingResponse(_iter(), media_type="text/event-stream")
+    consumer: queue.Queue = queue.Queue(maxsize=200)
+    with _event_bus_lock:
+        _event_bus.append(consumer)
+
+    def _generate():
+        yield "event: ready\ndata: {\"status\": \"connected\"}\n\n"
+        try:
+            while True:
+                try:
+                    event = consumer.get(timeout=15)
+                    if trace_id and event.get("trace_id") != trace_id:
+                        continue
+                    yield f"data: {json.dumps(event)}\n\n"
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            with _event_bus_lock:
+                try:
+                    _event_bus.remove(consumer)
+                except ValueError:
+                    pass
+
+    return StreamingResponse(_generate(), media_type="text/event-stream")
+
+
+@router.get("/api/traces/{trace_id}/events")
+def get_trace_events(
+    trace_id: str,
+    honeycomb_root: str = Query(".honeycomb"),
+) -> dict[str, Any]:
+    """Return all events recorded so far for a trace_id (polling-friendly)."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    events = honeycomb.read_events(trace_id)
+    return {"trace_id": trace_id, "events": events, "count": len(events)}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: User Permission Policy endpoints
+# ---------------------------------------------------------------------------
+
+class UserPolicyUpdate(BaseModel):
+    always_allow: list[str] | None = None
+    always_ask: list[str] | None = None
+    always_deny: list[str] | None = None
+    max_auto_cost_usd: float | None = None
+
+
+@router.get("/api/policy")
+def get_user_policy(
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Get the current user's autonomy policy."""
+    import os
+    from beekeeper.user_policy import load_user_policy
+
+    store_root = os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")
+    policy = load_user_policy(store_root, user.user_id)
+    return {"policy": policy.model_dump(mode="json"), "user_id": user.user_id}
+
+
+@router.put("/api/policy")
+def update_user_policy(
+    body: UserPolicyUpdate,
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Update the current user's autonomy policy."""
+    import os
+    from beekeeper.user_policy import load_user_policy, save_user_policy
+
+    store_root = os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")
+    policy = load_user_policy(store_root, user.user_id)
+    if body.always_allow is not None:
+        policy.always_allow = body.always_allow
+    if body.always_ask is not None:
+        policy.always_ask = body.always_ask
+    if body.always_deny is not None:
+        policy.always_deny = body.always_deny
+    if body.max_auto_cost_usd is not None:
+        policy.max_auto_cost_usd = body.max_auto_cost_usd
+    save_user_policy(store_root, user.user_id, policy)
+    return {"ok": True, "policy": policy.model_dump(mode="json"), "user_id": user.user_id}
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Workers catalog endpoint (built-in + generated skills)
+# ---------------------------------------------------------------------------
+
+@router.get("/api/workers")
+def list_all_workers(
+    honeycomb_root: str = ".honeycomb",
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """List all workers: built-in, registered custom, and LLM-generated plugins."""
+    from beekeeper.worker_registry import WorkerRegistry
+    from pathlib import Path as P
+
+    root = P(honeycomb_root) if P(honeycomb_root).is_absolute() else P.cwd() / honeycomb_root
+    registry = WorkerRegistry(root)
+    all_workers = registry.list_workers()
+
+    # Tag generated workers (have a .py file in workers/generated/)
+    generated_dir = root / "workers" / "generated"
+    generated_kinds: set[str] = set()
+    if generated_dir.exists():
+        for f in generated_dir.glob("*.py"):
+            generated_kinds.add(f.stem)
+
+    enriched = []
+    for w in all_workers:
+        entry = dict(w)
+        kind = entry.get("worker_kind", "")
+        entry["is_generated"] = kind in generated_kinds
+        entry["has_code"] = kind in generated_kinds
+        enriched.append(entry)
+
+    return {
+        "workers": enriched,
+        "total": len(enriched),
+        "generated_count": len(generated_kinds),
+        "default_worker": registry.get_default_worker().value,
+    }
+
+
+class CreateSkillRequest(BaseModel):
+    description: str
+    name: str = ""
+    capabilities: list[str] = Field(default_factory=lambda: ["custom"])
+    example_queries: list[str] = Field(default_factory=list)
+    honeycomb_root: str = ".honeycomb"
+
+
+@router.post("/api/workers")
+def create_skill(
+    body: CreateSkillRequest,
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Create a new skill/worker via natural language description."""
+    import re
+    from beekeeper.worker_registry import WorkerRegistry
+    from pathlib import Path as P
+
+    if not body.description.strip():
+        raise HTTPException(status_code=400, detail="description is required")
+
+    root = P(body.honeycomb_root) if P(body.honeycomb_root).is_absolute() else P.cwd() / body.honeycomb_root
+    registry = WorkerRegistry(root)
+    registry.ensure_registry_file()
+
+    name = body.name.strip()
+    if not name:
+        words = re.sub(r"[^a-z0-9 ]+", " ", body.description.lower()).split()[:4]
+        name = " ".join(words).title()
+
+    worker_kind = f"custom_skill_{re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')}"
+    existing = next(
+        (w for w in registry.list_workers() if w.get("worker_kind") == worker_kind),
+        None,
+    )
+    if existing:
+        return {"ok": True, "created": False, "worker_kind": worker_kind, "note": "Already exists", "entry": existing}
+
+    query_keywords = [t for t in re.split(r"[^a-z0-9]+", body.description.lower()) if len(t) > 3][:8]
+    entry = registry.register_custom_worker(
+        worker_kind=worker_kind,
+        name=name,
+        description=body.description,
+        capabilities=body.capabilities or ["custom"],
+        intent_patterns=[worker_kind],
+        payload_triggers=[],
+        query_keywords=query_keywords,
+        priority=15,
+        persist=True,
+    )
+    return {
+        "ok": True,
+        "created": True,
+        "worker_kind": worker_kind,
+        "name": name,
+        "description": body.description,
+        "entry": entry,
+        "skill_card": {
+            "worker_kind": worker_kind,
+            "name": name,
+            "description": body.description,
+            "capabilities": body.capabilities,
+            "example_queries": body.example_queries,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: HITL queue aliases (also exposed as /api/reviews)
+# ---------------------------------------------------------------------------
+
+@router.get("/api/reviews")
+def list_reviews(
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """List pending HITL review requests (alias for /api/approvals)."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    pending = honeycomb.list_pending_reviews()
+    return {
+        "pending_count": len(pending),
+        "reviews": [r.model_dump(mode="json") for r in pending],
+    }
+
+
+@router.post("/api/reviews/{review_id}/approve")
+def approve_review_alias(
+    review_id: str,
+    body: ApprovalActionRequest = ApprovalActionRequest(),
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Approve a pending review (alias for /api/approvals/{id}/approve)."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    review = honeycomb.get_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="review_not_found")
+    if review.status != "pending":
+        return {"review": review.model_dump(mode="json"), "resumed": False}
+    from pathlib import Path as P
+    root = P(honeycomb_root) if P(honeycomb_root).is_absolute() else P.cwd() / honeycomb_root
+    queen = QueenAgent(QueenConfig(honeycomb_root=root))
+    result = queen.resume_human_review(
+        review_id,
+        approver=body.approver or user.email or "operator",
+        approved=True,
+        note=body.note or "",
+    )
+    resolved = honeycomb.get_review(review_id)
+    return {
+        "review": resolved.model_dump(mode="json") if resolved else {},
+        "resumed": result.get("resumed", False),
+    }
+
+
+@router.post("/api/reviews/{review_id}/deny")
+def deny_review(
+    review_id: str,
+    body: ApprovalActionRequest = ApprovalActionRequest(),
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Deny/reject a pending review."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    review = honeycomb.get_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="review_not_found")
+    if review.status != "pending":
+        return {"review": review.model_dump(mode="json")}
+    resolved = honeycomb.resolve_review(
+        review_id,
+        approved=False,
+        approver=body.approver or user.email or "operator",
+        note=body.note,
+    )
+    return {"review": resolved.model_dump(mode="json")}
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Work history — richer trace summaries
+# ---------------------------------------------------------------------------
+
+@router.get("/api/history")
+def get_work_history(
+    honeycomb_root: str = ".honeycomb",
+    limit: int = Query(20, ge=1, le=100),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    """Return recent trace summaries with intent, worker, status, and outcome snippet."""
+    honeycomb = get_honeycomb(honeycomb_root)
+    summaries = honeycomb.list_recent_traces(limit=limit)
+    return {"history": summaries, "count": len(summaries)}

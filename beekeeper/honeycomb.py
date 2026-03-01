@@ -2,11 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import queue as _queue
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+# Module-level live-event broadcast bus.
+# Each connected SSE client holds a Queue in this list.
+_event_bus: list[_queue.Queue] = []
+_event_bus_lock = threading.Lock()
+
+
+def _broadcast_event(event: dict) -> None:
+    with _event_bus_lock:
+        dead: list[_queue.Queue] = []
+        for q in _event_bus:
+            try:
+                q.put_nowait(event)
+            except _queue.Full:
+                dead.append(q)
+        for q in dead:
+            _event_bus.remove(q)
 
 from .contracts import (
     ArtifactRef,
@@ -102,6 +121,59 @@ class HoneycombStore:
         )
         return [f.stem for f in files[:limit]]
 
+    def list_recent_traces(self, limit: int = 20) -> list[dict[str, Any]]:
+        """List recent traces with summary info (trace_id, intent, worker_kinds, status, timestamps)."""
+        if not self.events_dir.exists():
+            return []
+        files = sorted(
+            self.events_dir.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        summaries: list[dict[str, Any]] = []
+        for f in files[:limit]:
+            trace_id = f.stem
+            try:
+                events = self._read_jsonl(f)
+            except Exception:
+                continue
+            if not events:
+                continue
+            worker_kinds: list[str] = []
+            intent: str = ""
+            status: str = "unknown"
+            assistant_reply: str = ""
+            first_at = events[0].get("at", "")
+            last_at = events[-1].get("at", "")
+            for ev in events:
+                kind = ev.get("kind", "")
+                if kind == "task" and not intent:
+                    intent = ev.get("task", {}).get("task_type", "")
+                    wk = ev.get("worker_kind") or ev.get("task", {}).get("worker_kind", "")
+                    if wk and wk not in worker_kinds:
+                        worker_kinds.append(wk)
+                if kind == "result":
+                    status = ev.get("status", "unknown")
+                    out = ev.get("result", {}).get("output", {})
+                    if isinstance(out, dict):
+                        for key in ("assistant_reply", "answer", "response", "summary"):
+                            v = out.get(key, "")
+                            if isinstance(v, str) and v.strip():
+                                assistant_reply = v[:300]
+                                break
+            summaries.append(
+                {
+                    "trace_id": trace_id,
+                    "intent": intent,
+                    "worker_kinds": worker_kinds,
+                    "status": status,
+                    "first_at": first_at,
+                    "last_at": last_at,
+                    "summary": assistant_reply,
+                }
+            )
+        return summaries
+
     def read_events(self, trace_id: str) -> list[dict[str, Any]]:
         """Read all events for a trace."""
         return self._read_jsonl(self.events_dir / f"{trace_id}.jsonl")
@@ -111,8 +183,9 @@ class HoneycombStore:
         return self._read_jsonl(self.graph_dir / f"{trace_id}.jsonl")
 
     def write_event(self, trace_id: str, row: dict[str, Any]) -> None:
-        payload = {"event_id": str(uuid4()), "at": utcnow_iso(), **row}
+        payload = {"event_id": str(uuid4()), "at": utcnow_iso(), "trace_id": trace_id, **row}
         self._append_jsonl(self.events_dir / f"{trace_id}.jsonl", payload)
+        _broadcast_event(payload)
 
     def write_task(self, task: TaskEnvelope) -> None:
         self.write_event(

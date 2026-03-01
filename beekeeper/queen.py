@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 from asyncio import run as asyncio_run
 from dataclasses import dataclass, field
@@ -61,11 +62,35 @@ from .worker_registry import WorkerRegistry
 from .queen_context import build_context_bundle, ensure_queen_context_file, load_queen_context, render_queen_context
 from .skill_loader import load_skills_from_md
 from .autonomy import AutonomyPolicy, DEFAULT_AUTONOMY_POLICY
+from .user_policy import UserPolicy, load_user_policy, merge_policy_into_autonomy
 from .queen_updates import write_queen_update
 from .queen_actions import ActionContext, QueenActionLoop, build_default_action_registry
 from .tool_adapters import register_action_tools, register_worker_tools
 from .tool_runtime import ToolExecutionPolicy, ToolExecutor, ToolLoopEngine, ToolRegistry
 from .llm_provider import build_llm_router
+
+
+_SHELL_TASK_KEYWORDS = re.compile(
+    r'(?:'
+    # Unambiguous shell commands — always route to bash
+    r'\b(?:mv|cp|chmod|mkdir|curl)\b'
+    # Tilde path — always a filesystem reference
+    r'|~/'
+    # move/copy/rename require a file/folder/path context to avoid "move on", "copy that"
+    r'|\b(?:move|copy|rename)\b.{0,60}?\b(?:file|folder|dir(?:ectory)?|\.[\w]{1,6}|~\/|\/\w)\b'
+    # find/list/delete/remove only when followed by file/folder nouns
+    r'|\b(?:find|list|delete|remove)\b\s+(?:(?:the|all|my|a)\s+)?(?:file|files|folder|folders|dir(?:ectory|ectories)?)\b'
+    # create/make a dir or folder
+    r'|\b(?:create|make)\s+(?:a\s+)?(?:dir(?:ectory)?|folder)\b'
+    # save/write to a path (must end with extension or start with ~/ or /)
+    r'|\b(?:save|write)\b.{0,80}?(?:to|as|in)\s+(?:~\/|\/|\S+\.(?:md|txt|json|csv|log|py|sh|yaml|yml))\b'
+    r')',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _looks_like_shell_task(query: str) -> bool:
+    return bool(_SHELL_TASK_KEYWORDS.search(query))
 
 
 @dataclass
@@ -171,6 +196,7 @@ class QueenAgent:
             openai_base_url=self.config.openai_base_url,
             openai_timeout_seconds=self.config.openai_timeout_seconds,
         )
+        self._plugin_reload_lock = threading.Lock()
         self._tool_registry: ToolRegistry | None = None
         self._tool_executor: ToolExecutor | None = None
         self._tool_loop_engine: ToolLoopEngine | None = None
@@ -1021,9 +1047,13 @@ class QueenAgent:
                 is_template=False,
             )
         )
-        plugin = self._ensure_worker_plugin(worker_kind_str, intent=intent, name=name, payload=payload)
-        self.worker_runtime.reload_plugins(self.config.honeycomb_root)
-        self.worker_registry.reload()
+        try:
+            plugin = self._ensure_worker_plugin(worker_kind_str, intent=intent, name=name, payload=payload)
+        except Exception as spawn_exc:
+            return {"worker_kind": worker_kind_str, "created": False, "plugin_error": str(spawn_exc)}
+        with self._plugin_reload_lock:
+            self.worker_runtime.reload_plugins(self.config.honeycomb_root)
+            self.worker_registry.reload()
 
         MAX_FIX_ATTEMPTS = 2
         plugin_path = Path(self.config.honeycomb_root) / "workers" / "generated" / f"{worker_kind_str}.py"
@@ -1051,8 +1081,9 @@ class QueenAgent:
                     build_context=build_context,
                 )
                 plugin_path.write_text(fixed, encoding="utf-8")
-                self.worker_runtime.reload_plugins(self.config.honeycomb_root)
-                self.worker_registry.reload()
+                with self._plugin_reload_lock:
+                    self.worker_runtime.reload_plugins(self.config.honeycomb_root)
+                    self.worker_registry.reload()
                 test_ok, test_error = self._test_generated_worker(worker_kind_str, intent, payload)
                 if test_ok:
                     payload["_runtime_worker_key"] = worker_kind_str
@@ -1072,8 +1103,9 @@ class QueenAgent:
         # All retries exhausted — write static fallback
         static = self._build_forged_worker_source(worker_kind_str, class_name, intent, name)
         plugin_path.write_text(static, encoding="utf-8")
-        self.worker_runtime.reload_plugins(self.config.honeycomb_root)
-        self.worker_registry.reload()
+        with self._plugin_reload_lock:
+            self.worker_runtime.reload_plugins(self.config.honeycomb_root)
+            self.worker_registry.reload()
         return {
             "worker_kind": worker_kind_str,
             "created": True,
@@ -1083,6 +1115,28 @@ class QueenAgent:
             "fallback_workers": fallback_workers,
             **plugin,
         }
+
+    _SKILL_CREATION_PHRASES = (
+        "create a skill",
+        "build a skill",
+        "make a skill",
+        "create a worker",
+        "build a worker",
+        "make a worker",
+        "make a tool",
+        "build a tool",
+        "create a tool",
+        "teach you to",
+        "teach you how to",
+        "add a skill",
+        "new skill that",
+        "new worker that",
+    )
+
+    def _detect_skill_creation_intent(self, query: str) -> bool:
+        """Return True if the query is asking to create a new skill/worker/tool."""
+        lower = query.lower()
+        return any(phrase in lower for phrase in self._SKILL_CREATION_PHRASES)
 
     def _route_worker_kind(self, intent: str, payload: dict[str, Any], trace_id: str | None = None) -> WorkerKind:
         if intent == "context_curation":
@@ -1094,6 +1148,10 @@ class QueenAgent:
             if file_action:
                 payload.update(file_action)
                 return WorkerKind.file_system
+            # Complex file/shell ops: route to BashWorker when query looks like a shell task
+            # but didn't match FileWorker's strict patterns
+            if _looks_like_shell_task(query):
+                return WorkerKind.bash
         details = self.worker_registry.select_worker_details(intent, payload, query)
         worker_kind = details["worker_kind"]
         best_score = details["best_score"]
@@ -1102,28 +1160,32 @@ class QueenAgent:
         if worker_kind == WorkerKind.custom and worker_kind_str:
             payload["_runtime_worker_key"] = worker_kind_str
         if content_score == 0:
-            # No intent/payload/keyword matched — auto-spawn a worker for this intent and use ForgedWorker now
-            try:
-                spawn = self._auto_spawn_worker(intent, payload)
-            except Exception as exc:
-                spawn = {
-                    "worker_kind": self._normalize_worker_kind(intent),
-                    "created": False,
-                    "forge_error": str(exc),
-                }
-            if trace_id:
-                self.honeycomb.write_event(
-                    trace_id,
-                    {
-                        "kind": "auto_worker_spawn",
-                        "intent": intent,
-                        "content_score": content_score,
-                        "best_score": best_score,
-                        **spawn,
-                    },
-                )
-            if spawn.get("verified") and spawn.get("worker_kind"):
-                payload["_runtime_worker_key"] = spawn["worker_kind"]
+            # No intent/payload/keyword matched — fire auto-spawn in background so THIS
+            # request returns immediately (ForgedWorker), and the generated worker is
+            # available for the NEXT request with the same intent.
+            worker_kind_str_bg = self._normalize_worker_kind(intent)
+            existing_bg = next(
+                (w for w in self.worker_registry.list_workers()
+                 if w.get("worker_kind") == worker_kind_str_bg),
+                None,
+            )
+            if not existing_bg:
+                threading.Thread(
+                    target=self._auto_spawn_worker,
+                    args=(intent, dict(payload)),
+                    daemon=True,
+                    name=f"auto_spawn_{worker_kind_str_bg}",
+                ).start()
+                if trace_id:
+                    self.honeycomb.write_event(
+                        trace_id,
+                        {
+                            "kind": "auto_spawn_started",
+                            "worker_kind": worker_kind_str_bg,
+                            "intent": intent,
+                            "content_score": content_score,
+                        },
+                    )
             return WorkerKind.forged
         feedback = self.honeycomb.read_routing_feedback()
         if feedback and worker_kind in {WorkerKind.web_search, WorkerKind.heavy_compute}:
@@ -1444,6 +1506,43 @@ class QueenAgent:
             "step_count": final.step_count,
         }
 
+    # Patterns that detect "save results to a file" post-processing intent
+    _SAVE_TO_FILE_PATTERNS: list[Any] = []
+
+    @classmethod
+    def _build_save_to_file_patterns(cls) -> None:
+        cls._SAVE_TO_FILE_PATTERNS = [
+            # "save it in a markdown file", "save it as report.md", "save to file.txt"
+            re.compile(r'save\s+(?:it\s+)?(?:in|as|to)\s+(?:a\s+)?(?:markdown\s+file|(?:(?:a\s+)?(?:[\w\-]+\.(md|txt|json|csv|html|rst))))(?:\s+named?\s+["\']?(?P<fname>[\w\-\.]+)["\']?)?', re.IGNORECASE),
+            # "and save it in a markdown file named foo.md"
+            re.compile(r'save\s+(?:it\s+)?(?:in|as|to)\s+(?:a\s+)?(?:markdown|text|md)\s+file\s+(?:named?\s+)?["\']?(?P<fname>[\w\-\.]+\.(?:md|txt|json|csv|html))["\']?', re.IGNORECASE),
+            # "write (/save) the results/report/output to foo.md"
+            re.compile(r'(?:write|save)\s+(?:the\s+)?(?:results?|report|output|data|findings?|info(?:rmation)?)\s+(?:to|as|into?)\s+["\']?(?P<fname>[\w\-\.]+\.(?:md|txt|json|csv|html))["\']?', re.IGNORECASE),
+            # "create a report ... save ..."  with explicit filename anywhere
+            re.compile(r'\b(?:save|write|export|store)\s+(?:it\s+)?(?:to|as|in(?:to)?)\s+["\']?(?P<fname>[\w\-\.]+\.(?:md|txt|json|csv|html))["\']?', re.IGNORECASE),
+        ]
+
+    @classmethod
+    def _extract_save_to_file_request(cls, query: str) -> tuple[bool, str]:
+        """Return (should_save, filename). filename may be auto-generated if not specified."""
+        if not cls._SAVE_TO_FILE_PATTERNS:
+            cls._build_save_to_file_patterns()
+        for pattern in cls._SAVE_TO_FILE_PATTERNS:
+            m = pattern.search(query)
+            if m:
+                try:
+                    fname = m.group("fname")
+                except IndexError:
+                    fname = None
+                if not fname:
+                    # Auto-generate a filename based on keywords in the query
+                    words = re.findall(r'\b[a-zA-Z0-9_\-]+\b', query.lower())
+                    stopwords = {"a","an","the","and","or","to","in","as","is","it","for","of","on","at","by","from","with","that","this","go","create","make","generate","save","write","report","file","please","can","you","me"}
+                    slug_words = [w for w in words if w not in stopwords][:4]
+                    fname = ("_".join(slug_words) or "report") + ".md"
+                return True, fname
+        return False, ""
+
     # (operation, compiled_regex, path_group, content_group_or_None)
     _FILE_ACTION_PATTERNS: list[tuple[str, Any, int, int | None]] = []
 
@@ -1456,6 +1555,7 @@ class QueenAgent:
             ("append", re.compile(r'append\s+["\']?(.+?)["\']?\s+to\s+(?:file\s+)?["\']?(\S+?)["\']?\s*$', re.IGNORECASE | re.DOTALL), 2, 1),
             ("delete", re.compile(r'(?:delete|remove|rm)\s+(?:(?:the\s+)?file\s+)?["\']?(\S+\.\S+)["\']?\s*$', re.IGNORECASE), 1, None),
             ("mkdir",  re.compile(r'(?:create|make|mkdir)\s+(?:a\s+)?(?:directory|dir|folder)\s+["\']?(\S+?)["\']?\s*$', re.IGNORECASE), 1, None),
+            ("read",   re.compile(r'(?:open|read|show|display|cat|print|view)\s+(?:(?:the|file)\s+)?["\']?(\S+\.\S+)["\']?\s*$', re.IGNORECASE), 1, None),
         ]
 
     @classmethod
@@ -1475,6 +1575,16 @@ class QueenAgent:
                 return result
         return None
 
+    def _select_execution_path(self, payload: dict[str, Any], action_result_present: bool) -> str:
+        """Return the name of the execution path that will be (or was) taken."""
+        if action_result_present and payload.get("stop_after_actions"):
+            return "action_loop"
+        if self.config.execution_mode in ("model_tools", "hybrid"):
+            return "tool_loop"
+        if not self._should_delegate_to_workers(payload):
+            return "direct_chat"
+        return "worker_delegation"
+
     def _should_delegate_to_workers(self, payload: dict[str, Any]) -> bool:
         """False = Queen responds directly (Ollama only). True = delegate to workers."""
         if payload.get("delegate_to_worker") is True:
@@ -1489,6 +1599,8 @@ class QueenAgent:
         query = str(payload.get("query") or payload.get("topic") or "").strip()
         if query and self._infer_file_action(query):
             return True
+        if query and _looks_like_shell_task(query):
+            return True
         return False
 
     _WORKER_STATUS: dict[WorkerKind, str] = {
@@ -1496,9 +1608,8 @@ class QueenAgent:
         WorkerKind.heavy_compute: "Dispatching to heavy compute worker: running analysis…",
         WorkerKind.audit: "Dispatching to audit worker: performing validation…",
         WorkerKind.context_curator: "Dispatching to context curator: extracting durable memory…",
-        WorkerKind.monitor: "Running monitor task…",
-        WorkerKind.logger: "Logging…",
         WorkerKind.custom: "Executing task…",
+        WorkerKind.bash: "Running shell command…",
     }
 
     def _run_action_loop(
@@ -1507,6 +1618,7 @@ class QueenAgent:
         payload: dict[str, Any],
         trace_id: str,
         status_callback: Callable[[str], None] | None = None,
+        user_policy: Any | None = None,
     ) -> dict[str, Any] | None:
         """
         If ``payload["queen_actions"]`` is a non-empty list, execute the
@@ -1528,6 +1640,7 @@ class QueenAgent:
             worker_registry=self.worker_registry,
             trace_id=trace_id,
             status_callback=status_callback,
+            user_policy=user_policy,
         )
         loop = QueenActionLoop(ctx, registry=self._action_registry)
         return loop.run(raw_actions, trace_id=trace_id)
@@ -1583,6 +1696,20 @@ class QueenAgent:
         queen_request_id = str(uuid4())
         scheduler_backend, scheduler_decision = self._resolve_scheduler_backend(payload)
         log_service_call("queen", "called", source=source or "unknown", trace_id=queen_trace_id)
+        # Reset per-request mutable state
+        self.tracer.reset()
+        self.autonomy_policy = self.config.autonomy_policy or DEFAULT_AUTONOMY_POLICY
+        # Load per-user policy and merge into autonomy policy for this request
+        _user_policy = None
+        user_id = str(payload.get("user_id", "")).strip()
+        if user_id:
+            try:
+                import os as _os
+                _store_root = _os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")
+                _user_policy = load_user_policy(_store_root, user_id)
+                self.autonomy_policy = merge_policy_into_autonomy(_user_policy, self.config.autonomy_policy or DEFAULT_AUTONOMY_POLICY)
+            except Exception:
+                pass
         if session_id and not self.honeycomb.sessions_dir.joinpath(f"{session_id}.json").exists():
             session_id = None
         with self.tracer.span(queen_trace_id, "queen.run") as queen_span:
@@ -1597,8 +1724,29 @@ class QueenAgent:
                 queen_trace_id,
                 {"kind": "scheduler_decision", **scheduler_decision},
             )
+            # ── Skill creation detection: inject create_skill action when user asks in natural language ──
+            _query = str(payload.get("query") or payload.get("topic") or "").strip()
+            if _query and self._detect_skill_creation_intent(_query) and not payload.get("queen_actions"):
+                payload["queen_actions"] = [
+                    {"action": "create_skill", "parameters": {"description": _query}}
+                ]
+                payload["stop_after_actions"] = True
+                _emit("Detected skill creation request — building new skill…")
             # ── Action loop: Queen takes direct actions, learns, spawns workers ──
-            action_result = self._run_action_loop(intent, payload, queen_trace_id, status_callback)
+            action_result = self._run_action_loop(intent, payload, queen_trace_id, status_callback, user_policy=_user_policy)
+            chosen_path = self._select_execution_path(payload, action_result is not None)
+            self.honeycomb.write_event(
+                queen_trace_id,
+                {
+                    "kind": "execution_path",
+                    "path": chosen_path,
+                    "execution_mode": self.config.execution_mode,
+                    "delegate_to_worker": payload.get("delegate_to_worker"),
+                    "use_web_search": payload.get("use_web_search"),
+                    "has_actions": bool(payload.get("queen_actions")),
+                    "stop_after_actions": payload.get("stop_after_actions", False),
+                },
+            )
             if action_result is not None:
                 # Emit an event so the trace captures the action round
                 self.honeycomb.write_event(
@@ -1840,6 +1988,36 @@ class QueenAgent:
                 if final_result is not None:
                     results.append(final_result)
             self.honeycomb.enforce_retention_lifecycle()
+
+            # Post-processing: if user requested saving results to a file, do it now
+            _orig_query = str(payload.get("query") or payload.get("topic") or intent).strip()
+            _should_save, _save_fname = self._extract_save_to_file_request(_orig_query)
+            if _should_save and results:
+                try:
+                    # Collect all assistant replies into one markdown document
+                    _parts: list[str] = []
+                    for _r in results:
+                        _out = _r.output if hasattr(_r, "output") else {}
+                        for _k in ("assistant_reply", "answer", "summary", "text", "synthesis"):
+                            _v = _out.get(_k) if isinstance(_out, dict) else None
+                            if isinstance(_v, str) and _v.strip():
+                                _parts.append(_v.strip())
+                                break
+                    if _parts:
+                        _file_content = "\n\n---\n\n".join(_parts)
+                        _save_path = Path(_save_fname) if Path(_save_fname).is_absolute() else Path(os.getcwd()) / _save_fname
+                        _save_path.parent.mkdir(parents=True, exist_ok=True)
+                        _save_path.write_text(_file_content, encoding="utf-8")
+                        _emit(f"Saved report to {_save_path}")
+                        self.honeycomb.write_event(
+                            queen_trace_id,
+                            {"kind": "file_saved", "path": str(_save_path), "bytes": len(_file_content.encode())},
+                        )
+                except Exception as _exc:
+                    self.honeycomb.write_event(
+                        queen_trace_id,
+                        {"kind": "file_save_error", "error": str(_exc)},
+                    )
 
             return {
                 "trace_id": queen_trace_id,

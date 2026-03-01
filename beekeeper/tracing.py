@@ -25,6 +25,10 @@ class Tracer:
     def __init__(self) -> None:
         self._events: list[dict] = []
 
+    def reset(self) -> None:
+        """Clear accumulated spans so the tracer can be reused across requests."""
+        self._events = []
+
     @property
     def events(self) -> list[dict]:
         return self._events

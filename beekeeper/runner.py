@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +19,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from rich.console import Console
+from rich.markdown import Markdown as RichMarkdown
+
+_console = Console()
 
 def _project_root_for_env() -> Path | None:
     """Find project root (dir with .env or pyproject.toml) by walking up from cwd or package root."""
@@ -114,15 +122,42 @@ def _extract_primary_response(run_output: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_chat_loop(args: argparse.Namespace) -> int:
+    import getpass
     current_scheduler = getattr(args, "scheduler", "inline")
     model_override: str | None = None
     cfg = _build_config(args, scheduler_override=current_scheduler)
     queen = QueenAgent(cfg)
     current_intent = args.intent
-    honeycomb_store = HoneycombStore(HoneycombConfig(root_dir=Path(args.honeycomb_root)))
+    honeycomb_root = Path(args.honeycomb_root)
+    honeycomb_store = HoneycombStore(HoneycombConfig(root_dir=honeycomb_root))
+    verbose = getattr(args, "verbose", False)
+
+    # User ID and memory store
+    user_id = getattr(args, "user_id", None) or os.getenv("BEEKEEPER_USER_ID", "") or getpass.getuser()
+    store_root = Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store"))
+    try:
+        _mem_store: BeekeeperStore | None = BeekeeperStore(store_root)
+    except Exception:
+        _mem_store = None
+
+    _pending_spawns: set[str] = set()
+
     print("Beekeeper Queen chat")
-    print("Type your message. Commands: /help, /intent <name>, /model, /scheduler, /tree, /trace, /exit")
+    print(f"User: {user_id}  |  Commands: /help, /intent, /model, /scheduler, /tree, /trace, /exit")
     while True:
+        # Notify about completed background spawns
+        if _pending_spawns:
+            try:
+                registry = WorkerRegistry(honeycomb_root)
+                current_kinds = {w.get("worker_kind", "") for w in registry.list_workers()}
+                completed = _pending_spawns & current_kinds
+                for wk in completed:
+                    print(f"\n  ✓ Worker '{wk}' is ready — it will handle similar tasks from now on.")
+                _pending_spawns -= completed
+            except Exception:
+                pass
+
+        print()  # blank line before prompt for readability
         try:
             raw = input("you> ").strip()
         except EOFError:
@@ -145,6 +180,7 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
             print("  /trace [trace_id]   show trace events and details")
             print("  /exit               leave chat")
             print("  Start chat with --quiet to suppress step-by-step progress.")
+            print("  Start chat with --verbose to show worker kind and confidence.")
             print("Input mode:")
             print("  plain text       -> sent as payload {'query': <text>}")
             print("  JSON object      -> sent as raw payload")
@@ -227,6 +263,19 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
         if model_override:
             payload["model_override"] = model_override
 
+        # Attach user identity and memories
+        payload["user_id"] = user_id
+        if _mem_store is not None:
+            try:
+                user_memories = [
+                    {"content": m["content"]}
+                    for m in _mem_store.search_user_memories(user_id, query=raw, limit=12)
+                ]
+                if user_memories:
+                    payload["user_memories"] = user_memories
+            except Exception:
+                pass
+
         def _on_status(msg: str) -> None:
             print(f"  → {msg}", flush=True, file=sys.stderr)
 
@@ -244,12 +293,51 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
         worker_kind = primary.get("worker_kind", "unknown")
         confidence = primary.get("confidence", 0.0)
         response = primary.get("output", {})
+
+        # Check trace for auto-spawn events
+        trace_id = output.get("trace_id", "")
+        if trace_id:
+            try:
+                trace_events = honeycomb_store.read_events(trace_id)
+                spawn_events = [e for e in trace_events if e.get("kind") == "auto_spawn_started"]
+                for ev in spawn_events:
+                    wk = ev.get("worker_kind", "custom")
+                    print(f"\n  ⚡ New task type detected — building a custom worker ({wk}) in the background.")
+                    print(f"     This request was handled immediately. Future requests of this type will be faster.")
+                    _pending_spawns.add(wk)
+            except Exception:
+                pass
+
+        # Display reply
         if isinstance(response, dict) and isinstance(response.get("assistant_reply"), str):
-            print(f"queen[{worker_kind}|conf={confidence:.2f}]> {response['assistant_reply']}")
-            source = response.get("response_source", "unknown")
-            print(f"(source: {source})")
+            reply_text = response["assistant_reply"]
+            prefix = f"queen[{worker_kind}|conf={confidence:.2f}]" if verbose else "queen"
+            _console.print(f"[bold green]{prefix}>[/bold green]")
+            _console.print(RichMarkdown(reply_text))
+            if verbose:
+                _console.print(f"[dim](source: {response.get('response_source', 'unknown')})[/dim]")
         else:
-            print(f"queen[{worker_kind}|conf={confidence:.2f}]> {json.dumps(response, ensure_ascii=True)}")
+            reply_text = ""
+            raw_json = json.dumps(response, ensure_ascii=True)
+            prefix = f"queen[{worker_kind}|conf={confidence:.2f}]" if verbose else "queen"
+            _console.print(f"[bold green]{prefix}>[/bold green] {raw_json}")
+
+        # Background context curation
+        def _curate(text: str = raw, reply: str = reply_text, uid: str = user_id) -> None:
+            try:
+                queen.run(
+                    intent="context_curation",
+                    payload={
+                        "user_msg": text[:1200],
+                        "assistant_reply": reply[:3000],
+                        "user_id": uid,
+                        "delegate_to_worker": True,
+                    },
+                    source="cli:context_curator",
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_curate, daemon=True).start()
 
 
 @dataclass
@@ -1157,6 +1245,330 @@ def _run_templates_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def _check_docker_available() -> tuple[bool, str]:
+    try:
+        r = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+        if r.returncode == 0:
+            return True, "Docker daemon running"
+        return False, "Docker daemon not responding (is Docker Desktop running?)"
+    except FileNotFoundError:
+        return False, "docker not found — install Docker Desktop from https://docker.com"
+    except subprocess.TimeoutExpired:
+        return False, "docker info timed out — Docker daemon may be starting"
+
+
+def _check_env_warnings() -> None:
+    providers_str = (os.getenv("BEEKEEPER_LLM_PROVIDERS") or os.getenv("BEEKEEPER_LLM_PROVIDER") or "").strip()
+    if "gemini" in providers_str and not os.getenv("BEEKEEPER_GEMINI_API_KEY", "").strip():
+        print("  [WARN] BEEKEEPER_GEMINI_API_KEY not set (required for gemini provider)")
+    if "openai" in providers_str and not os.getenv("BEEKEEPER_OPENAI_API_KEY", "").strip():
+        print("  [WARN] BEEKEEPER_OPENAI_API_KEY not set (required for openai provider)")
+
+
+def _wait_for_service(
+    name: str,
+    *,
+    url: str | None = None,
+    tcp_host: str | None = None,
+    tcp_port: int | None = None,
+    timeout: float = 60.0,
+) -> bool:
+    """Poll an HTTP URL or TCP port until it becomes available. Returns True on success."""
+    start = time.monotonic()
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    spin_idx = 0
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout:
+            print(f"\r  ✗ {name:<20} (timeout after {timeout:.0f}s)")
+            return False
+        ok = False
+        if url:
+            try:
+                req = urllib.request.Request(url, method="GET", headers={"User-Agent": "beekeeper-start/1.0"})
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    ok = 200 <= getattr(resp, "status", 200) < 400
+            except urllib.error.HTTPError as e:
+                ok = e.code < 500
+            except Exception:
+                ok = False
+        elif tcp_host and tcp_port:
+            try:
+                with socket.create_connection((tcp_host, tcp_port), timeout=2):
+                    ok = True
+            except Exception:
+                ok = False
+        if ok:
+            print(f"\r  ✓ {name}")
+            return True
+        char = spinner[spin_idx % len(spinner)]
+        print(f"\r  {char} waiting for {name}...", end="", flush=True)
+        spin_idx += 1
+        time.sleep(2.0)
+
+
+def _print_start_success_panel() -> None:
+    width = 60
+    lines = [
+        "  ✓  Beekeeper is running",
+        "",
+        "  Web UI:      http://localhost:3000",
+        "  Dashboard:   http://localhost:8787",
+        "  Queen API:   http://localhost:8788",
+        "",
+        "  Quick commands:",
+        "    beekeeper chat     →  talk to Queen in terminal",
+        "    beekeeper status   →  live stats (workers, storage)",
+        "    beekeeper ps       →  container status",
+        "    beekeeper doctor   →  health checks",
+        "    beekeeper down     →  stop all services",
+    ]
+    border = "─" * (width - 2)
+    print(f"┌{border}┐")
+    for line in lines:
+        padded = line.ljust(width - 2)
+        print(f"│{padded}│")
+    print(f"└{border}┘")
+
+
+def _run_start(args: argparse.Namespace) -> int:
+    # Step 1: Docker pre-flight
+    print("Checking dependencies...")
+    ok, msg = _check_docker_available()
+    if not ok:
+        print(f"  ✗ {msg}")
+        return 1
+    print(f"  ✓ {msg}")
+
+    # Step 2: Check compose file
+    compose_file = _compose_file()
+    if not compose_file.exists():
+        print("  ✗ docker-compose.yml not found — run from the beekeeper project root")
+        return 1
+    print("  ✓ docker-compose.yml found")
+
+    # Step 3: Warn about missing env vars
+    _check_env_warnings()
+
+    # Step 4: Start all services
+    print("\nStarting services...")
+    services = [
+        "redis", "qdrant", "temporal", "searxng",
+        "celery-worker", "pulse", "beekeeper-api", "queen-api", "open-webui",
+    ]
+    try:
+        result = _run_compose(["up", "-d"] + services, capture_output=True)
+    except RuntimeError as exc:
+        print(f"[FAIL] compose: {exc}")
+        return 1
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        print("[FAIL] Could not start services. Run `beekeeper doctor` for details.")
+        if stderr:
+            print(stderr[:500])
+        return 1
+    print("  ✓ services launched")
+
+    # Step 5: Write queen start time (for status uptime display)
+    honeycomb_root = Path(getattr(args, "honeycomb_root", ".honeycomb"))
+    honeycomb_root.mkdir(parents=True, exist_ok=True)
+    start_file = honeycomb_root / "queen_start.txt"
+    if not start_file.exists():
+        start_file.write_text(datetime.now(timezone.utc).isoformat())
+
+    # Step 6: Wait for each service to become healthy
+    print("\nWaiting for services to be ready...")
+    health_targets = [
+        ("redis",         None,                           "localhost", 6379),
+        ("qdrant",        "http://localhost:6333/readyz",  None,        None),
+        ("temporal",      None,                           "localhost", 7233),
+        ("searxng",       "http://localhost:8080/",        None,        None),
+        ("beekeeper-api", "http://localhost:8787/health",  None,        None),
+        ("queen-api",     "http://localhost:8788/health",  None,        None),
+        ("open-webui",    "http://localhost:3000/",        None,        None),
+    ]
+    all_ready = True
+    for name, url, tcp_host, tcp_port in health_targets:
+        ready = _wait_for_service(name, url=url, tcp_host=tcp_host, tcp_port=tcp_port)
+        if not ready:
+            all_ready = False
+
+    if not all_ready:
+        print("\n[WARN] Some services may still be starting. Run `beekeeper doctor` to check.")
+
+    print()
+    _print_start_success_panel()
+    return 0
+
+
+# ── beekeeper status ──────────────────────────────────────────────────────────
+
+def _dir_size_mb(path: Path) -> float:
+    total = 0
+    try:
+        for dirpath, _, filenames in os.walk(path):
+            for f in filenames:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, f))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total / (1024 * 1024)
+
+
+def _gather_status_data(honeycomb_root: Path) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+
+    # Containers via compose ps --format json
+    containers: list[dict[str, Any]] = []
+    try:
+        r = _run_compose(["ps", "--format", "json"], capture_output=True)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, list):
+                        containers.extend(obj)
+                    elif isinstance(obj, dict):
+                        containers.append(obj)
+                except json.JSONDecodeError:
+                    pass
+    except Exception:
+        pass
+    data["containers"] = containers
+
+    # Workers
+    try:
+        registry = WorkerRegistry(honeycomb_root)
+        workers = registry.list_workers()
+    except Exception:
+        workers = []
+    data["workers"] = workers
+
+    # Generated workers
+    gen_dir = honeycomb_root / "workers" / "generated"
+    try:
+        data["generated_workers"] = len(list(gen_dir.glob("*.py"))) if gen_dir.exists() else 0
+    except Exception:
+        data["generated_workers"] = 0
+
+    # Storage size
+    data["storage_mb"] = _dir_size_mb(honeycomb_root)
+
+    # Trace count
+    events_dir = honeycomb_root / "events"
+    try:
+        data["traces"] = len(list(events_dir.glob("*.jsonl"))) if events_dir.exists() else 0
+    except Exception:
+        data["traces"] = 0
+
+    # Memory count
+    mem_file = honeycomb_root / "queen_memories.jsonl"
+    try:
+        data["memories"] = sum(1 for _ in mem_file.open()) if mem_file.exists() else 0
+    except Exception:
+        data["memories"] = 0
+
+    # Queen uptime
+    start_file = honeycomb_root / "queen_start.txt"
+    try:
+        if start_file.exists():
+            started = datetime.fromisoformat(start_file.read_text().strip())
+            elapsed = datetime.now(timezone.utc) - started
+            hours, rem = divmod(int(elapsed.total_seconds()), 3600)
+            mins = rem // 60
+            data["uptime"] = f"{hours}h {mins}m"
+        else:
+            data["uptime"] = "unknown"
+    except Exception:
+        data["uptime"] = "unknown"
+
+    return data
+
+
+def _print_status_screen(data: dict[str, Any], now_str: str) -> None:
+    print(f"Beekeeper Status  [{now_str}]  (q to quit)")
+    print("─" * 54)
+
+    print(f"\nQueen")
+    print(f"  Uptime:   {data.get('uptime', 'unknown')}")
+
+    workers: list[dict[str, Any]] = data.get("workers", [])
+    gen_count = data.get("generated_workers", 0)
+    print(f"\nWorkers ({len(workers)} registered)")
+    for w in workers[:8]:
+        kind = w.get("worker_kind", "?")
+        mp = str(w.get("module_path", ""))
+        source = "generated" if "generated" in mp else "built-in"
+        print(f"  {kind:<30} {source:<12} ✓ active")
+    if len(workers) > 8:
+        print(f"  ... and {len(workers) - 8} more")
+
+    containers: list[dict[str, Any]] = data.get("containers", [])
+    print(f"\nContainers")
+    if containers:
+        col = 0
+        for c in containers:
+            name = c.get("Name", c.get("Service", "?"))
+            state = c.get("State", c.get("Status", "?"))
+            sym = "✓" if "running" in str(state).lower() else "✗"
+            print(f"  {name:<20} {sym}", end="")
+            col += 1
+            if col % 3 == 0:
+                print()
+        if col % 3 != 0:
+            print()
+    else:
+        print("  (no container info — is Docker running?)")
+
+    print(f"\nStorage")
+    print(
+        f"  Honeycomb:  {data.get('storage_mb', 0):.1f} MB   "
+        f"Traces: {data.get('traces', 0)}   "
+        f"Memories: {data.get('memories', 0)}"
+    )
+    print(f"  Workers:    {len(workers)} registered  ({gen_count} generated)")
+
+
+def _run_status(args: argparse.Namespace) -> int:
+    honeycomb_root = Path(getattr(args, "honeycomb_root", ".honeycomb"))
+    interval = getattr(args, "interval", 3.0)
+    once = getattr(args, "once", False)
+
+    def render() -> None:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data = _gather_status_data(honeycomb_root)
+        if not once:
+            print("\033[2J\033[H", end="")
+        _print_status_screen(data, now_str)
+
+    if once:
+        render()
+        return 0
+
+    try:
+        while True:
+            render()
+            deadline = time.monotonic() + interval
+            while time.monotonic() < deadline:
+                try:
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+                    if rlist:
+                        ch = sys.stdin.read(1)
+                        if ch in ("q", "Q"):
+                            print("\nbye")
+                            return 0
+                except Exception:
+                    time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\nbye")
+        return 0
+
+
 def main() -> None:
     _load_env_early()
     parser = argparse.ArgumentParser(prog="beekeeper", description="Beekeeper runtime CLI")
@@ -1178,6 +1590,8 @@ def main() -> None:
     chat_parser.add_argument("--honeycomb-root", default=".honeycomb")
     chat_parser.add_argument("--max-reruns", type=int, default=1)
     chat_parser.add_argument("--quiet", action="store_true", help="Suppress step-by-step progress; show only final reply")
+    chat_parser.add_argument("--verbose", action="store_true", help="Show worker kind and confidence in replies")
+    chat_parser.add_argument("--user-id", dest="user_id", default=None, help="User ID for memory scoping (default: system username)")
 
     doctor_parser = subparsers.add_parser("doctor", help="Check Beekeeper service connectivity")
     doctor_parser.add_argument(
@@ -1332,6 +1746,14 @@ def main() -> None:
     subparsers.add_parser("version", help="Show version")
     update_parser = subparsers.add_parser("update", help="Upgrade beekeeper package")
     update_parser.add_argument("--channel", "-c", choices=["stable", "beta", "dev"], default="stable", help="Release channel: stable (default), beta, dev")
+
+    start_parser = subparsers.add_parser("start", help="Start all Beekeeper services and print ready panel")
+    start_parser.add_argument("--honeycomb-root", default=".honeycomb")
+
+    status_parser = subparsers.add_parser("status", help="Live Beekeeper stats (Ctrl+C or q to quit)")
+    status_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    status_parser.add_argument("--interval", type=float, default=3.0, help="Refresh interval in seconds")
+    status_parser.add_argument("--once", action="store_true", help="Print once and exit (no live refresh)")
 
     args = parser.parse_args()
     if args.command is None:
@@ -1520,6 +1942,12 @@ def main() -> None:
         except Exception:
             print("beekeeper-agent-platform (version unknown)")
         raise SystemExit(0)
+
+    if args.command == "start":
+        raise SystemExit(_run_start(args))
+
+    if args.command == "status":
+        raise SystemExit(_run_status(args))
 
     if args.command == "update":
         channel = getattr(args, "channel", "stable")
