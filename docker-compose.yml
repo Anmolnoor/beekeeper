@@ -60,7 +60,9 @@ services:
       dockerfile: Dockerfile
     container_name: beekeeper-celery-worker
     command: ["celery", "-A", "beekeeper.celery_app.celery_app", "worker", "--loglevel=INFO"]
+    user: "10001:10001"
     environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
       BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
       BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
@@ -73,7 +75,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
-      BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
       BEEKEEPER_TEMPORAL_ENDPOINT: temporal:7233
       BEEKEEPER_TEMPORAL_NAMESPACE: default
       BEEKEEPER_TEMPORAL_TASK_QUEUE: beekeeper-queue
@@ -95,6 +97,7 @@ services:
     command: ["python", "-m", "beekeeper.temporal_worker"]
     restart: unless-stopped
     environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
       BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
       BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
@@ -107,7 +110,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
-      BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
       BEEKEEPER_TEMPORAL_ENDPOINT: temporal:7233
       BEEKEEPER_TEMPORAL_NAMESPACE: default
       BEEKEEPER_TEMPORAL_TASK_QUEUE: beekeeper-queue
@@ -128,6 +131,7 @@ services:
     container_name: beekeeper-pulse
     command: ["python", "-m", "beekeeper.runner", "pulse", "--interval", "2", "--honeycomb-root", "/app/runtime/honeycomb"]
     environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
       BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-gemini,ollama}
       BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-ollama}
@@ -135,7 +139,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
-      BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
     volumes:
       - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
     depends_on:
@@ -153,6 +157,7 @@ services:
     ports:
       - "8788:8788"
     environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
       BEEKEEPER_SCHEDULER_BACKEND: auto
       BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
@@ -166,7 +171,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
-      BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
     volumes:
       - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
     extra_hosts:
@@ -188,6 +193,7 @@ services:
     ports:
       - "8787:8787"
     environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
       BEEKEEPER_PORT: "8787"
       BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
       BEEKEEPER_STORE_ROOT: /app/runtime/store
@@ -202,7 +208,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://100.99.106.59:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
-      BEEKEEPER_SEARXNG_BASE_URL: ${BEEKEEPER_SEARXNG_BASE_URL:-http://searxng:8080}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
       BEEKEEPER_BASE_URL: http://localhost:8787
     volumes:
       - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
@@ -231,4 +237,3 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - queen-api
-

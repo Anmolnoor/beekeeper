@@ -117,6 +117,20 @@ class TestExtractSaveToFileRequest:
         assert ok is True
         assert fname == "summary.md"
 
+    def test_dot_md_file_named_phrase(self) -> None:
+        ok, fname = QueenAgent._extract_save_to_file_request(
+            "save the report as an .md file named anmolnoor_github_report.md"
+        )
+        assert ok is True
+        assert fname == "anmolnoor_github_report.md"
+
+    def test_strips_trailing_punctuation_from_filename(self) -> None:
+        ok, fname = QueenAgent._extract_save_to_file_request(
+            "write the output to anmolnoor_github_report.md."
+        )
+        assert ok is True
+        assert fname == "anmolnoor_github_report.md"
+
     def test_no_save_intent(self) -> None:
         ok, fname = QueenAgent._extract_save_to_file_request(
             "search github for anmolnoor"
@@ -265,3 +279,30 @@ class TestQueenPostProcessing:
         )
         md_files = list(tmp_path.glob("*.md"))
         assert len(md_files) == 0
+
+    def test_unverified_save_claim_helpers(self) -> None:
+        assert QueenAgent._query_requests_file_save("save this report as markdown") is True
+        sanitized = QueenAgent._remove_unverified_save_claims(
+            "I analyzed the data.\nReport saved to /tmp/fake_report.md"
+        )
+        assert "saved to /tmp/fake_report.md" not in sanitized.lower()
+
+    def test_canonicalize_save_reply_uses_only_verified_path(self, tmp_path: Path) -> None:
+        saved = tmp_path / "anmolnoor_github_report.md"
+        raw = (
+            "Analysis complete.\n\n"
+            "### 📍 Exact File Path\n"
+            "The report has been prepared for storage at:\n"
+            "**`reports/anmolnoor_github_report.md`**\n"
+            "(Note: mirrored to `/home/anmol_noor/hive_terminal/github/anmolnoor_github_report.md`)."
+        )
+        reply = QueenAgent._canonicalize_save_reply(
+            raw,
+            save_requested=True,
+            save_succeeded=True,
+            save_path=saved,
+        )
+        assert "reports/anmolnoor_github_report.md" not in reply
+        assert "/home/anmol_noor/hive_terminal/github/anmolnoor_github_report.md" not in reply
+        assert f"**Report saved to:** `{saved}`" in reply
+        assert reply.count("Report saved to") == 1

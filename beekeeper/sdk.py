@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from .honeycomb import HoneycombConfig, HoneycombStore
 from .queen import QueenAgent, QueenConfig
+from .runtime_env import resolve_searxng_base_url
 from .runner import (
     _collect_doctor_checks,
     _doctor_checks_to_json,
@@ -61,7 +62,7 @@ class BeekeeperClient:
                 gemini_api_key=os.getenv("BEEKEEPER_GEMINI_API_KEY", ""),
                 gemini_model=os.getenv("BEEKEEPER_GEMINI_MODEL", "gemini-1.5-flash"),
                 gemini_timeout_seconds=int(os.getenv("BEEKEEPER_GEMINI_TIMEOUT_SECONDS", "120")),
-                searxng_base_url=os.getenv("BEEKEEPER_SEARXNG_BASE_URL", "http://localhost:8080"),
+                searxng_base_url=resolve_searxng_base_url(runtime_context="local"),
                 **self._extra_config,
             )
             self._queen = QueenAgent(cfg)

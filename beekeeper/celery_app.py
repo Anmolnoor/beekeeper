@@ -6,6 +6,7 @@ from typing import Any
 
 from celery import Celery
 
+from .runtime_env import resolve_searxng_base_url
 from .worker import execute_task_serialized
 
 broker_url = os.getenv("BEEKEEPER_CELERY_BROKER_URL", "redis://localhost:6379/0")
@@ -22,7 +23,7 @@ ollama_timeout_seconds = int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120"
 gemini_api_key = os.getenv("BEEKEEPER_GEMINI_API_KEY", "")
 gemini_model = os.getenv("BEEKEEPER_GEMINI_MODEL", "gemini-1.5-flash")
 gemini_timeout_seconds = int(os.getenv("BEEKEEPER_GEMINI_TIMEOUT_SECONDS", "120"))
-searxng_base_url = os.getenv("BEEKEEPER_SEARXNG_BASE_URL", "http://localhost:8080")
+searxng_base_url = resolve_searxng_base_url(runtime_context="docker")
 
 celery_app = Celery("beekeeper", broker=broker_url, backend=backend_url)
 

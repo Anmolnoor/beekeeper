@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from beekeeper.audit_logger import log_service_call
 from beekeeper.queen import QueenAgent, QueenConfig
+from beekeeper.runtime_env import resolve_runtime_context
 
 # Load .env at module load so QueenConfig/LLM get env vars
 def _load_env() -> None:
@@ -42,6 +43,23 @@ def _get_queen(config: QueenConfig) -> QueenAgent:
     if key not in _queen_cache:
         _queen_cache[key] = QueenAgent(config)
     return _queen_cache[key]
+
+
+def _runtime_metadata() -> dict[str, str]:
+    try:
+        import beekeeper.queen as queen_module
+        queen_path = Path(queen_module.__file__ or "").resolve()
+        queen_mtime = str(int(queen_path.stat().st_mtime))
+        queen_module_path = str(queen_path)
+    except Exception:
+        queen_mtime = "unknown"
+        queen_module_path = "unknown"
+    return {
+        "runtime_context": resolve_runtime_context(),
+        "runtime_version": os.getenv("BEEKEEPER_RUNTIME_VERSION", "dev-local"),
+        "queen_module_path": queen_module_path,
+        "queen_module_mtime_epoch": queen_mtime,
+    }
 
 QUEEN_MODEL_ID = "beekeeper-queen"
 
@@ -318,7 +336,7 @@ def _stream_reply(reply: str) -> StreamingResponse:
 @app.get("/health")
 def health():
     """Health check endpoint."""
-    return {"status": "ok", "service": "queen-api"}
+    return {"status": "ok", "service": "queen-api", **_runtime_metadata()}
 
 
 # ---------------------------------------------------------------------------
