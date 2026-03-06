@@ -86,6 +86,11 @@ BEEKEEPER_LLM_PROVIDERS=ollama,gemini  →  Ollama first, Gemini fallback
 BEEKEEPER_LLM_PROVIDER=ollama          →  single provider (legacy)
 ```
 
+Runtime precedence:
+- `BEEKEEPER_LLM_PROVIDERS` (ordered chain) takes precedence over `BEEKEEPER_LLM_PROVIDER`.
+- Explicit process env (for example `BEEKEEPER_LLM_PROVIDER=ollama beekeeper run ...`) is not overridden by values in `.env`.
+- If only `BEEKEEPER_LLM_PROVIDER` is set in runtime config, router order is exactly that provider.
+
 ### Ollama (local)
 
 ```bash

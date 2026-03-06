@@ -29,6 +29,15 @@ All environment variables used by the platform. Set them in `.env` (loaded autom
 > In `docker-compose.yml`, several services set
 > `BEEKEEPER_LLM_PROVIDERS=${BEEKEEPER_LLM_PROVIDERS:-gemini,ollama}`, so the
 > compose default order is Gemini first, then Ollama.
+>
+> Runtime precedence:
+> 1) Explicit process environment
+> 2) `.env`
+> 3) built-in defaults
+>
+> Router precedence:
+> 1) `BEEKEEPER_LLM_PROVIDERS` (ordered chain)
+> 2) `BEEKEEPER_LLM_PROVIDER` (single provider)
 
 ### Ollama
 

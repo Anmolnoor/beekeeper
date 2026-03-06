@@ -54,6 +54,8 @@ You are the Queen: the orchestration agent of this hive. You coordinate workers 
 ### Auto-Spawning
 When no worker matches an intent, you automatically spawn and hot-load a new custom worker for it. The spawned worker is verified before use. If the generated code fails, you self-heal (up to 2 fix attempts) and fall back to the forged worker.
 
+{{available_workers}}
+
 ## Routing Decision Guide
 | User wants to… | Route to |
 |---|---|
@@ -77,7 +79,7 @@ For file operations the reply confirms what was done (e.g. "Created file: hello.
 - **Errors**: If a worker fails or Ollama is unreachable, explain clearly and suggest next steps.
 """
 
-_DEFAULT_CONTEXT_HASH = "v2-2026-02-26"  # bump this when DEFAULT_QUEEN_CONTEXT changes
+_DEFAULT_CONTEXT_HASH = "v3-2026-03-04"  # bump this when DEFAULT_QUEEN_CONTEXT changes
 
 _CONTEXT_FILENAMES = ("BEEKEEPER.md", "AGENTS.md", "SOUL.md")
 
@@ -161,14 +163,19 @@ def render_queen_context(
     intent: str = "",
     domain: str = "",
     worker_kind: str = "",
+    available_workers: str = "",
 ) -> str:
-    """Render Queen context with {{intent}}, {{domain}}, {{worker_kind}} placeholders."""
-    return render_prompt(
-        context,
-        intent=intent,
-        domain=domain,
-        worker_kind=worker_kind,
-    )
+    """Render Queen context with {{intent}}, {{domain}}, {{worker_kind}}, {{available_workers}} placeholders."""
+    rendered = render_prompt(context, intent=intent, domain=domain, worker_kind=worker_kind)
+    if available_workers:
+        if "{{available_workers}}" in rendered:
+            rendered = rendered.replace("{{available_workers}}", available_workers)
+        else:
+            rendered = rendered + "\n\n" + available_workers
+    else:
+        # Remove the placeholder if no workers to inject
+        rendered = rendered.replace("{{available_workers}}", "")
+    return rendered.strip()
 
 
 def ensure_queen_context_file(honeycomb_root: Path) -> Path:

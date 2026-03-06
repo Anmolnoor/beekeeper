@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
+import re
 import subprocess
 import textwrap
 import urllib.parse
@@ -49,7 +50,16 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _build_user_context_system(payload: dict[str, Any]) -> str | None:
+_FILE_OP_GUARDRAIL = (
+    "IMPORTANT: You do not have direct filesystem access and cannot personally write files to disk. "
+    "When asked to research, summarize, or generate content: produce the full content requested. "
+    "File saving is handled automatically by the system pipeline — simply provide the content. "
+    "Do not refuse research or content requests. "
+    "Do not claim to have personally saved or written a file."
+)
+
+
+def _build_user_context_system(payload: dict[str, Any]) -> str:
     memories = payload.get("user_memories") or []
     lines = []
     if isinstance(memories, list):
@@ -70,7 +80,7 @@ def _build_user_context_system(payload: dict[str, Any]) -> str | None:
             if isinstance(m, str) and m.strip():
                 lines.append(f"- {m.strip()}")
     if not lines:
-        return None
+        return _FILE_OP_GUARDRAIL
     deduped: list[str] = []
     seen: set[str] = set()
     for line in lines:
@@ -78,7 +88,7 @@ def _build_user_context_system(payload: dict[str, Any]) -> str | None:
             continue
         seen.add(line)
         deduped.append(line)
-    return "User context from past conversations:\n" + "\n".join(deduped[:20])
+    return _FILE_OP_GUARDRAIL + "\n\nUser context from past conversations:\n" + "\n".join(deduped[:20])
 
 
 @dataclass
@@ -141,6 +151,7 @@ class WebSearchWorker(BaseSpecialistWorker):
     ) -> None:
         self.llm_provider = (llm_provider or "ollama").strip().lower()
         self.llm_router = build_llm_router(
+            llm_provider=self.llm_provider,
             llm_providers=llm_providers,
             ollama_base_url=ollama_base_url,
             ollama_model=ollama_model,
@@ -316,6 +327,7 @@ class ForgedWorker(BaseSpecialistWorker):
 
     def __init__(
         self,
+        llm_provider: str = "ollama",
         llm_providers: str | None = None,
         ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
@@ -328,7 +340,9 @@ class ForgedWorker(BaseSpecialistWorker):
         openai_base_url: str | None = None,
         openai_timeout_seconds: int = 120,
     ) -> None:
+        self.llm_provider = (llm_provider or "ollama").strip().lower()
         self.llm_router = build_llm_router(
+            llm_provider=self.llm_provider,
             llm_providers=llm_providers,
             ollama_base_url=ollama_base_url,
             ollama_model=ollama_model,
@@ -784,6 +798,30 @@ class AuditWorker(BaseSpecialistWorker):
                     )
                 )
                 score -= 0.25
+            output = target_result.get("output") if isinstance(target_result, dict) else None
+            if isinstance(output, dict):
+                op = str(output.get("operation", ""))
+                if op == "write":
+                    bytes_written = int(output.get("bytes_written", 0) or 0)
+                    preview = str(output.get("content_preview", "") or "").strip()
+                    if bytes_written < 64:
+                        findings.append(
+                            AuditFinding(
+                                severity="high",
+                                code="insufficient_written_content",
+                                detail=f"written content too small for report task: {bytes_written} bytes",
+                            )
+                        )
+                        score -= 0.45
+                    if preview and re.fullmatch(r"(it|this|that)(\s+in\s+\w+)?", preview.lower()):
+                        findings.append(
+                            AuditFinding(
+                                severity="high",
+                                code="placeholder_like_content",
+                                detail=f"content preview appears placeholder-like: {preview[:80]}",
+                            )
+                        )
+                        score -= 0.35
         score = max(0.0, min(1.0, score))
         verdict = "pass" if score >= 0.8 else "review" if score >= 0.55 else "fail"
         return AuditOutput(target_task_id=target_task_id, score=score, findings=findings, verdict=verdict).model_dump(mode="json")
@@ -837,6 +875,7 @@ class WorkerRuntime:
             WorkerKind.context_curator: ContextCuratorWorker(),
             WorkerKind.file_system: FileWorker(),
             WorkerKind.forged: ForgedWorker(
+                llm_provider=llm_provider,
                 llm_providers=llm_providers,
                 ollama_base_url=ollama_base_url,
                 ollama_model=ollama_model,

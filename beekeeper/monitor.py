@@ -74,6 +74,18 @@ class SentinelMonitor:
                     quality_score=quality_score,
                     retry_category="quality",
                 )
+        if task.worker_kind == WorkerKind.file_system:
+            operation = str(result.output.get("operation", ""))
+            if operation == "write":
+                bytes_written = int(result.output.get("bytes_written", 0) or 0)
+                preview = str(result.output.get("content_preview", "") or "").strip().lower()
+                if bytes_written < 64 and preview:
+                    return MonitorDecision(
+                        action="escalate",
+                        reason="insufficient_file_content_for_report",
+                        quality_score=min(quality_score, 0.45),
+                        retry_category="quality",
+                    )
         if task.worker_kind == WorkerKind.audit:
             verdict = str(result.output.get("verdict", "review"))
             if verdict == "fail":

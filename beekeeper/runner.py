@@ -54,11 +54,12 @@ def _load_env_early() -> None:
         from dotenv import load_dotenv
         root = _project_root_for_env()
         if root is not None:
-            load_dotenv(root / ".env")
-        # Also load from cwd so local overrides work (e.g. running from project subdir)
+            # Never override already-exported env vars (CLI/session overrides win).
+            load_dotenv(root / ".env", override=False)
+        # Also load from cwd if present, without overriding explicit env vars.
         cwd_env = Path.cwd() / ".env"
         if cwd_env.exists():
-            load_dotenv(cwd_env, override=True)
+            load_dotenv(cwd_env, override=False)
         if root is None and not cwd_env.exists():
             load_dotenv()
     except ImportError:
@@ -66,11 +67,17 @@ def _load_env_early() -> None:
 
 from .honeycomb import HoneycombConfig, HoneycombStore
 from .ops import compute_ops_metrics, send_alert_webhook
+from .audit_compliance import (
+    create_integrity_checkpoints,
+    reconcile_audit_trace_links,
+    verify_integrity,
+)
 from .package_installer import install_package, list_installed_plugins, uninstall_plugin
 from .worker_registry import WorkerRegistry
 from .trace_compaction import compact_traces
 from .pulse import PulseConfig, run_pulse_loop
 from .queen import QueenAgent, QueenConfig
+from .runtime_env import resolve_searxng_base_url, validate_llm_provider_env
 from .store import BeekeeperStore
 
 
@@ -99,7 +106,7 @@ def _build_config(
         gemini_api_key=os.getenv("BEEKEEPER_GEMINI_API_KEY", ""),
         gemini_model=os.getenv("BEEKEEPER_GEMINI_MODEL", "gemini-1.5-flash"),
         gemini_timeout_seconds=int(os.getenv("BEEKEEPER_GEMINI_TIMEOUT_SECONDS", "120")),
-        searxng_base_url=os.getenv("BEEKEEPER_SEARXNG_BASE_URL", "http://localhost:8080"),
+        searxng_base_url=resolve_searxng_base_url(runtime_context="local"),
     )
     return cfg
 
@@ -465,40 +472,7 @@ def _check_http(
 
 def _check_llm_provider_env() -> DoctorCheck:
     """Verify LLM provider(s) have required env vars. Considers BEEKEEPER_LLM_PROVIDERS and BEEKEEPER_LLM_PROVIDER."""
-    providers_str = (os.getenv("BEEKEEPER_LLM_PROVIDERS") or "").strip()
-    if not providers_str:
-        providers_str = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "ollama").strip()
-    provider_names = [p.strip().lower() for p in providers_str.split(",") if p.strip()]
-    if not provider_names:
-        provider_names = ["ollama"]
-
-    missing: list[str] = []
-    warn_unused: list[str] = []
-    for name in provider_names:
-        if name == "gemini":
-            key = (os.getenv("BEEKEEPER_GEMINI_API_KEY") or "").strip()
-            if not key:
-                missing.append("BEEKEEPER_GEMINI_API_KEY (required when gemini in providers)")
-            else:
-                pass  # ok
-        elif name == "openai":
-            key = (os.getenv("BEEKEEPER_OPENAI_API_KEY") or "").strip()
-            if not key:
-                missing.append("BEEKEEPER_OPENAI_API_KEY (required when openai in providers)")
-            else:
-                pass  # ok
-        elif name == "ollama":
-            pass  # no key required
-        else:
-            missing.append(f"unknown provider '{name}'")
-
-    gemini_key = (os.getenv("BEEKEEPER_GEMINI_API_KEY") or "").strip()
-    if gemini_key and "gemini" not in provider_names:
-        warn_unused.append("BEEKEEPER_GEMINI_API_KEY set but gemini not in providers")
-    openai_key = (os.getenv("BEEKEEPER_OPENAI_API_KEY") or "").strip()
-    if openai_key and "openai" not in provider_names:
-        warn_unused.append("BEEKEEPER_OPENAI_API_KEY set but openai not in providers")
-
+    provider_names, missing, warn_unused = validate_llm_provider_env()
     if missing:
         return DoctorCheck(
             name="llm_provider",
@@ -603,7 +577,7 @@ def _collect_doctor_checks() -> list[DoctorCheck]:
     temporal_endpoint = os.getenv("BEEKEEPER_TEMPORAL_ENDPOINT", "localhost:7233")
     vector_url = os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333")
     ollama_url = os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://100.99.106.59:11434")
-    searxng_url = os.getenv("BEEKEEPER_SEARXNG_BASE_URL", "http://localhost:8080")
+    searxng_url = resolve_searxng_base_url(runtime_context="local")
 
     redis_host, redis_port = _parse_host_port_from_url(broker_url, default_port=6379)
     if ":" in temporal_endpoint:
@@ -1094,6 +1068,26 @@ def _run_metrics_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_audit_command(args: argparse.Namespace) -> int:
+    root = Path(getattr(args, "honeycomb_root", ".honeycomb"))
+    audit_cmd = getattr(args, "audit_command", None)
+    days = max(1, int(getattr(args, "days", 7)))
+    if audit_cmd == "reconcile":
+        result = reconcile_audit_trace_links(root, days=days, persist_report=True)
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        return 0 if result.get("status") == "pass" else 2
+    if audit_cmd == "checkpoint":
+        result = create_integrity_checkpoints(root, days=days)
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        return 0
+    if audit_cmd == "verify-integrity":
+        result = verify_integrity(root, days=days, persist_status=True)
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        return 0 if result.get("status") == "pass" else 2
+    print("[FAIL] unsupported audit command", file=sys.stderr)
+    return 1
+
+
 def _get_beekeeper_store() -> BeekeeperStore:
     root = Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store"))
     return BeekeeperStore(root)
@@ -1263,6 +1257,18 @@ def _check_env_warnings() -> None:
         print("  [WARN] BEEKEEPER_GEMINI_API_KEY not set (required for gemini provider)")
     if "openai" in providers_str and not os.getenv("BEEKEEPER_OPENAI_API_KEY", "").strip():
         print("  [WARN] BEEKEEPER_OPENAI_API_KEY not set (required for openai provider)")
+
+
+def _print_llm_run_preflight() -> bool:
+    providers, errors, warnings = validate_llm_provider_env()
+    print(f"[INFO] LLM providers: {','.join(providers)}")
+    for warning in warnings:
+        print(f"[WARN] {warning}")
+    if errors:
+        for error in errors:
+            print(f"[FAIL] {error}", file=sys.stderr)
+        return False
+    return True
 
 
 def _wait_for_service(
@@ -1569,6 +1575,47 @@ def _run_status(args: argparse.Namespace) -> int:
         return 0
 
 
+def _run_reset_password(args: argparse.Namespace) -> int:
+    """Reset a user's password interactively."""
+    import getpass as _getpass
+    _load_env_early()
+    store = _get_beekeeper_store()
+
+    email = args.email.strip()
+    user = store.get_user_by_email(email)
+    if user is None:
+        print(f"[FAIL] No user found with email: {email}", file=sys.stderr)
+        return 1
+
+    print(f"Resetting password for: {email} ({user.user_id})")
+
+    password = getattr(args, "password", None)
+    if not password:
+        password = _getpass.getpass("New password: ")
+        confirm  = _getpass.getpass("Confirm password: ")
+        if password != confirm:
+            print("[FAIL] Passwords do not match.", file=sys.stderr)
+            return 1
+
+    if len(password) < 8:
+        print("[FAIL] Password must be at least 8 characters.", file=sys.stderr)
+        return 1
+
+    try:
+        from beekeeper_api.auth import hash_password
+    except ImportError:
+        print("[FAIL] beekeeper_api is not installed.", file=sys.stderr)
+        return 1
+
+    user.password_hash = hash_password(password)
+    store._write_json(
+        store.root / "users" / f"{user.user_id}.json",
+        user.model_dump(mode="json"),
+    )
+    print(f"[OK] Password reset for {email}.")
+    return 0
+
+
 def main() -> None:
     _load_env_early()
     parser = argparse.ArgumentParser(prog="beekeeper", description="Beekeeper runtime CLI")
@@ -1657,6 +1704,16 @@ def main() -> None:
     metrics_parser = subparsers.add_parser("metrics", help="Compute telemetry metrics from Honeycomb")
     metrics_parser.add_argument("--honeycomb-root", default=".honeycomb")
     metrics_parser.add_argument("--webhook-url", default=None)
+
+    audit_parser = subparsers.add_parser("audit", help="Audit compliance operations")
+    audit_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    audit_sub = audit_parser.add_subparsers(dest="audit_command", required=True)
+    audit_reconcile = audit_sub.add_parser("reconcile", help="Reconcile audit trace link state")
+    audit_reconcile.add_argument("--days", type=int, default=7, help="Lookback window in days")
+    audit_checkpoint = audit_sub.add_parser("checkpoint", help="Create audit integrity checkpoints")
+    audit_checkpoint.add_argument("--days", type=int, default=7, help="Lookback window in days")
+    audit_verify = audit_sub.add_parser("verify-integrity", help="Verify audit integrity checkpoints")
+    audit_verify.add_argument("--days", type=int, default=7, help="Lookback window in days")
 
     pulse_parser = subparsers.add_parser("pulse", help="Run Pulse tick loop (Queen autonomy)")
     pulse_parser.add_argument("--honeycomb-root", default=".honeycomb")
@@ -1750,6 +1807,18 @@ def main() -> None:
     start_parser = subparsers.add_parser("start", help="Start all Beekeeper services and print ready panel")
     start_parser.add_argument("--honeycomb-root", default=".honeycomb")
 
+    resetpass_parser = subparsers.add_parser(
+        "reset-password",
+        help="Reset a user's password",
+    )
+    resetpass_parser.add_argument("email", help="Email address of the user")
+    resetpass_parser.add_argument(
+        "--password",
+        dest="password",
+        default=None,
+        help="New password (omit to be prompted interactively)",
+    )
+
     status_parser = subparsers.add_parser("status", help="Live Beekeeper stats (Ctrl+C or q to quit)")
     status_parser.add_argument("--honeycomb-root", default=".honeycomb")
     status_parser.add_argument("--interval", type=float, default=3.0, help="Refresh interval in seconds")
@@ -1762,6 +1831,8 @@ def main() -> None:
         raise SystemExit(exit_code)
 
     if args.command == "run":
+        if not _print_llm_run_preflight():
+            raise SystemExit(1)
         cfg = _build_config(args)
         queen = QueenAgent(cfg)
         payload = _parse_payload(args.payload, args.query)
@@ -1831,6 +1902,8 @@ def main() -> None:
         raise SystemExit(_run_review_command(args))
     if args.command == "metrics":
         raise SystemExit(_run_metrics_command(args))
+    if args.command == "audit":
+        raise SystemExit(_run_audit_command(args))
     if args.command == "pulse":
         config = PulseConfig(
             honeycomb_root=Path(args.honeycomb_root),
@@ -1945,6 +2018,9 @@ def main() -> None:
 
     if args.command == "start":
         raise SystemExit(_run_start(args))
+
+    if args.command == "reset-password":
+        raise SystemExit(_run_reset_password(args))
 
     if args.command == "status":
         raise SystemExit(_run_status(args))

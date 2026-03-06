@@ -15,11 +15,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from beekeeper.audit_compliance import (
+    create_integrity_checkpoints,
+    reconcile_audit_trace_links,
+    verify_integrity,
+)
 from beekeeper.audit_logger import log_service_call
 from beekeeper.channels import ChatHub
 from beekeeper.ops import compute_ops_metrics
 from beekeeper.queen import QueenAgent, QueenConfig
 from beekeeper.queen_updates import list_queen_updates
+from beekeeper.runtime_env import resolve_runtime_context
 from beekeeper.store import BeekeeperStore
 from beekeeper.tenancy import UserRecord
 
@@ -505,7 +511,13 @@ def _queen_from_request(body: RunChatRequest) -> QueenAgent:
 
 @router.get("/healthz")
 def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+    import os
+
+    return {
+        "status": "ok",
+        "runtime_context": resolve_runtime_context(),
+        "runtime_version": os.getenv("BEEKEEPER_RUNTIME_VERSION", "dev-local"),
+    }
 
 
 @router.post("/api/auth/login")
@@ -1765,6 +1777,13 @@ def list_traces(
     limit: int = 100,
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:trace_read",
+        user_id=user.user_id if user else None,
+        resource="trace:list",
+    )
     honeycomb = get_honeycomb(honeycomb_root)
     trace_ids = honeycomb.list_traces(limit=limit)
     return {"traces": trace_ids}
@@ -1776,6 +1795,14 @@ def get_trace(
     honeycomb_root: str = ".honeycomb",
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:trace_read",
+        user_id=user.user_id if user else None,
+        resource=f"trace:{trace_id}",
+        trace_id=trace_id,
+    )
     honeycomb = get_honeycomb(honeycomb_root)
     events = honeycomb.read_events(trace_id)
     edges = honeycomb.read_graph(trace_id)
@@ -1788,6 +1815,14 @@ def get_trace_tree(
     honeycomb_root: str = ".honeycomb",
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:trace_read",
+        user_id=user.user_id if user else None,
+        resource=f"trace_tree:{trace_id}",
+        trace_id=trace_id,
+    )
     honeycomb = get_honeycomb(honeycomb_root)
     return honeycomb.get_trace_tree(trace_id)
 
@@ -1798,6 +1833,14 @@ def get_trace_graph(
     honeycomb_root: str = ".honeycomb",
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:trace_read",
+        user_id=user.user_id if user else None,
+        resource=f"trace_graph:{trace_id}",
+        trace_id=trace_id,
+    )
     honeycomb = get_honeycomb(honeycomb_root)
     events = honeycomb.read_events(trace_id)
     edges = honeycomb.read_graph(trace_id)
@@ -2200,6 +2243,13 @@ def get_audit_logs(
     """List recent audit log entries (service invocations)."""
     from datetime import datetime, timedelta, timezone
 
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:audit_read",
+        user_id=user.user_id if user else None,
+        resource="audit:logs",
+    )
     root = get_honeycomb(honeycomb_root).root_dir
     audit_dir = root / "audit"
     if not audit_dir.exists():
@@ -2258,6 +2308,58 @@ def get_audit_logs(
     return {"logs": entries, "count": len(entries)}
 
 
+@router.post("/api/audit/reconcile")
+def reconcile_audit_links(
+    days: int = Query(7, ge=1, le=30),
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:audit_reconcile",
+        user_id=user.user_id if user else None,
+        resource=f"audit:reconcile:{days}",
+    )
+    root = get_honeycomb(honeycomb_root).root_dir
+    report = reconcile_audit_trace_links(root, days=days, persist_report=True)
+    return report
+
+
+@router.post("/api/audit/integrity/checkpoint")
+def create_audit_integrity_checkpoints(
+    days: int = Query(7, ge=1, le=30),
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:audit_integrity",
+        user_id=user.user_id if user else None,
+        resource=f"audit:integrity_checkpoint:{days}",
+    )
+    root = get_honeycomb(honeycomb_root).root_dir
+    return create_integrity_checkpoints(root, days=days)
+
+
+@router.post("/api/audit/integrity/verify")
+def verify_audit_integrity(
+    days: int = Query(7, ge=1, le=30),
+    honeycomb_root: str = Query(".honeycomb"),
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:audit_integrity",
+        user_id=user.user_id if user else None,
+        resource=f"audit:integrity_verify:{days}",
+    )
+    root = get_honeycomb(honeycomb_root).root_dir
+    return verify_integrity(root, days=days, persist_status=True)
+
+
 @router.get("/api/stream/events")
 def stream_events(trace_id: str | None = None) -> StreamingResponse:
     """Live SSE stream of honeycomb events. Optional trace_id filter."""
@@ -2294,6 +2396,13 @@ def get_trace_events(
     honeycomb_root: str = Query(".honeycomb"),
 ) -> dict[str, Any]:
     """Return all events recorded so far for a trace_id (polling-friendly)."""
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:trace_read",
+        resource=f"trace_events:{trace_id}",
+        trace_id=trace_id,
+    )
     honeycomb = get_honeycomb(honeycomb_root)
     events = honeycomb.read_events(trace_id)
     return {"trace_id": trace_id, "events": events, "count": len(events)}

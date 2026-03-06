@@ -503,6 +503,7 @@ class LLMRouter:
 
 def build_llm_router(
     *,
+    llm_provider: str = "ollama",
     llm_providers: str | None = None,
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "llama3.2",
@@ -519,7 +520,8 @@ def build_llm_router(
     if llm_providers:
         names = [p.strip().lower() for p in llm_providers.split(",") if p.strip()]
     else:
-        single = os.getenv("BEEKEEPER_LLM_PROVIDER", "ollama").strip().lower()
+        # Prefer explicit runtime config over process env defaults.
+        single = (llm_provider or "ollama").strip().lower()
         names = [single]
 
     providers: list[LLMProvider] = []

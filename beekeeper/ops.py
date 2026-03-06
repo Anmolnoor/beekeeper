@@ -85,6 +85,46 @@ def compute_ops_metrics(honeycomb_root: Path) -> dict[str, Any]:
         if avg_cost > 0.55:
             alerts.append({"kind": "cost_guard", "severity": "medium", "message": f"{worker} avg cost={avg_cost:.3f}usd"})
 
+    audit_metrics_path = honeycomb_root / "metrics" / "audit_metrics.json"
+    audit_runtime: dict[str, Any] = {}
+    if audit_metrics_path.exists():
+        try:
+            payload = json.loads(audit_metrics_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                audit_runtime = payload
+        except Exception:
+            audit_runtime = {}
+
+    audit_dir = honeycomb_root / "audit"
+    trace_link_total = 0
+    trace_link_ok = 0
+    if audit_dir.exists():
+        now = datetime.now(timezone.utc)
+        for day_offset in range(8):
+            d = now - timedelta(days=day_offset)
+            path = audit_dir / f"{d.strftime('%Y%m%d')}.jsonl"
+            for row in _iter_jsonl(path):
+                trace_id = str(row.get("trace_id", "")).strip()
+                if not trace_id:
+                    continue
+                trace_link_total += 1
+                state = str(row.get("trace_link_state", "")).strip().lower()
+                if state == "linked":
+                    trace_link_ok += 1
+                    continue
+                events_file = honeycomb_root / "events" / f"{trace_id}.jsonl"
+                if events_file.exists():
+                    trace_link_ok += 1
+    audit_trace_linkage_rate = (trace_link_ok / trace_link_total) if trace_link_total else 1.0
+    if trace_link_total and audit_trace_linkage_rate < 0.995:
+        alerts.append(
+            {
+                "kind": "audit_trace_linkage_drop",
+                "severity": "high",
+                "message": f"audit_trace_linkage_rate={audit_trace_linkage_rate:.3f}",
+            }
+        )
+
     return {
         "generated_at": now.isoformat(),
         "pending_human_reviews": len(pending_reviews),
@@ -92,6 +132,19 @@ def compute_ops_metrics(honeycomb_root: Path) -> dict[str, Any]:
         "quality_by_worker": quality_by_worker,
         "latency_p95_by_worker": latency_p95_by_worker,
         "cost_avg_by_worker": cost_avg_by_worker,
+        "audit_trace_linkage_rate": audit_trace_linkage_rate,
+        "audit_write_failure_count": int(audit_runtime.get("audit_write_failure_count", 0)),
+        "audit_retry_count": int(audit_runtime.get("audit_retry_count", 0)),
+        "audit_dead_letter_count": int(audit_runtime.get("audit_dead_letter_count", 0)),
+        "audit_queue_overflow_count": int(audit_runtime.get("audit_queue_overflow_count", 0)),
+        "audit_queue_depth": int(audit_runtime.get("audit_queue_depth", 0)),
+        "audit_queue_max_depth_seen": int(audit_runtime.get("audit_queue_max_depth_seen", 0)),
+        "redaction_hit_count": int(audit_runtime.get("redaction_hit_count", 0)),
+        "trace_linkage_resolved_count": int(audit_runtime.get("trace_linkage_resolved_count", 0)),
+        "trace_linkage_still_missing_count": int(audit_runtime.get("trace_linkage_still_missing_count", 0)),
+        "integrity_verification_status": str(audit_runtime.get("integrity_verification_status", "not_configured")),
+        "integrity_last_verified_at": str(audit_runtime.get("integrity_last_verified_at", "")),
+        "integrity_last_result": audit_runtime.get("integrity_last_result", {}),
         "alerts": alerts,
     }
 

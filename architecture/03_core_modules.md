@@ -176,6 +176,9 @@ Maps error strings to `RetryCategory`, applies exponential backoff (capped at 8s
 - Tries providers in order; returns first success
 - `model_tier` ∈ {`economy`, `standard`, `premium`} resolves model from env vars like `BEEKEEPER_OLLAMA_MODEL_PREMIUM`
 - `LLMRouter.from_env()` builds router from `BEEKEEPER_LLM_PROVIDERS` env var
+- `build_llm_router(...)` respects explicit runtime config first:
+  - if `llm_providers` is set, use that chain
+  - otherwise use explicit `llm_provider` (not ambient env fallback)
 
 ---
 

@@ -138,6 +138,22 @@ class WorkerRegistry:
         reg = self._load()
         return list(reg.get("workers", []))
 
+    def format_workers_for_prompt(self) -> str:
+        """Return markdown listing of all workers (built-ins + plugins) for LLM prompts."""
+        workers = self.list_workers()
+        if not workers:
+            return ""
+        lines = ["## Available Workers"]
+        for w in workers:
+            kind = w.get("worker_kind", "?")
+            name = w.get("name", kind)
+            desc = w.get("description", "")
+            caps = ", ".join(w.get("capabilities", []))
+            lines.append(f"- **{kind}** — {name}: {desc}")
+            if caps:
+                lines.append(f"  Capabilities: {caps}")
+        return "\n".join(lines)
+
     def get_default_worker(self) -> WorkerKind:
         """Worker to use when nothing matches."""
         reg = self._load()
@@ -162,6 +178,7 @@ class WorkerRegistry:
         intent: str,
         payload: dict[str, Any],
         query: str = "",
+        llm_tags: list[str] | None = None,
     ) -> tuple[WorkerKind, list[WorkerKind], int, int]:
         """
         Pick the best worker for this task.
@@ -169,7 +186,7 @@ class WorkerRegistry:
         content_score is the score without priority — 0 means no intent/payload/keyword matched.
         Queen uses content_score==0 to trigger ForgedWorker and auto-spawn a new worker.
         """
-        details = self.select_worker_details(intent, payload, query)
+        details = self.select_worker_details(intent, payload, query, llm_tags=llm_tags)
         return (
             details["worker_kind"],
             details["fallback_workers"],
@@ -182,12 +199,14 @@ class WorkerRegistry:
         intent: str,
         payload: dict[str, Any],
         query: str = "",
+        llm_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Pick worker and return both enum + raw worker_kind string."""
         reg = self._load()
         workers = reg.get("workers", [])
         query_lower = (query or "").lower()
         intent_lower = intent.lower()
+        tags_lower = [t.lower() for t in (llm_tags or [])]
 
         best_match: dict[str, Any] | None = None
         best_score = -1
@@ -221,6 +240,15 @@ class WorkerRegistry:
                 if cap.lower() in query_lower or cap.lower() in intent_lower:
                     content_score += 10
                     break
+
+            # LLM-provided tags boost score (+30 per matching tag)
+            if tags_lower:
+                patterns_lower = [p.lower() for p in w.get("intent_patterns", [])]
+                caps_lower = [c.lower() for c in w.get("capabilities", [])]
+                for tag in tags_lower:
+                    if tag in patterns_lower or tag in caps_lower or tag == kind_str.lower():
+                        content_score += 30
+                        break
 
             score = content_score + w.get("priority", 0)
 

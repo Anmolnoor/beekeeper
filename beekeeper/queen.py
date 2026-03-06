@@ -68,6 +68,7 @@ from .queen_actions import ActionContext, QueenActionLoop, build_default_action_
 from .tool_adapters import register_action_tools, register_worker_tools
 from .tool_runtime import ToolExecutionPolicy, ToolExecutor, ToolLoopEngine, ToolRegistry
 from .llm_provider import build_llm_router
+from .runtime_env import resolve_llm_providers, resolve_searxng_base_url
 
 
 _SHELL_TASK_KEYWORDS = re.compile(
@@ -120,7 +121,7 @@ class QueenConfig:
     openai_model: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OPENAI_MODEL", "gpt-4o-mini"))
     openai_base_url: str | None = field(default_factory=lambda: os.getenv("BEEKEEPER_OPENAI_BASE_URL") or None)
     openai_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEKEEPER_OPENAI_TIMEOUT_SECONDS", "120")))
-    searxng_base_url: str = field(default_factory=lambda: os.getenv("BEEKEEPER_SEARXNG_BASE_URL", "http://localhost:8080"))
+    searxng_base_url: str = field(default_factory=resolve_searxng_base_url)
     auto_approve_human_reviews: bool = False
     queen_blueprint_id: str = "blueprint.queen.default"
     worker_web_blueprint_id: str = "blueprint.worker.web"
@@ -184,6 +185,7 @@ class QueenAgent:
         self.autonomy_policy = self.config.autonomy_policy or DEFAULT_AUTONOMY_POLICY
         self._action_registry = build_default_action_registry()
         self._llm_router = build_llm_router(
+            llm_provider=self.config.llm_provider,
             llm_providers=self.config.llm_providers or None,
             ollama_base_url=self.config.ollama_base_url,
             ollama_model=self.config.ollama_model,
@@ -1138,6 +1140,38 @@ class QueenAgent:
         lower = query.lower()
         return any(phrase in lower for phrase in self._SKILL_CREATION_PHRASES)
 
+    def _classify_intent_with_llm(self, query: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Use the LLM to classify query intent and suggest a worker.
+
+        Returns dict with keys: intent, worker_hint, tags, needs_delegation.
+        Falls back to empty dict on any error (routing continues algorithmically).
+        """
+        try:
+            dynamic_workers = self.worker_registry.format_workers_for_prompt()
+            if not dynamic_workers:
+                return {}
+            classification_prompt = (
+                "You are routing a user request. Given the available workers below, "
+                "respond with JSON only — no explanation, no markdown fences:\n"
+                '{"intent": "<short_snake_case_intent>", "worker_hint": "<worker_kind or empty string>", '
+                '"tags": ["tag1", "tag2"], "needs_delegation": true}\n\n'
+                f"{dynamic_workers}\n\n"
+                f"User query: {query}"
+            )
+            reply, _src = self.worker_runtime.direct_chat(
+                query=classification_prompt,
+                system="You are a routing classifier. Return only valid JSON.",
+            )
+            if not reply:
+                return {}
+            # Extract the first JSON object from the reply
+            json_match = re.search(r"\{[^{}]*\}", reply, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+            return json.loads(reply.strip())
+        except Exception:
+            return {}
+
     def _route_worker_kind(self, intent: str, payload: dict[str, Any], trace_id: str | None = None) -> WorkerKind:
         if intent == "context_curation":
             return WorkerKind.context_curator
@@ -1151,8 +1185,27 @@ class QueenAgent:
             # Complex file/shell ops: route to BashWorker when query looks like a shell task
             # but didn't match FileWorker's strict patterns
             if _looks_like_shell_task(query):
-                return WorkerKind.bash
-        details = self.worker_registry.select_worker_details(intent, payload, query)
+                save_requested, _ = self._extract_save_to_file_request(query)
+                if save_requested and re.search(r"(?i)\b(report|summary|findings?|research)\b", query):
+                    # Save-intent on a report request should stay in content-generation flow,
+                    # then be saved by post-processing.
+                    pass
+                else:
+                    return WorkerKind.bash
+        # Extract LLM classification hints stored by caller
+        llm_tags: list[str] = payload.pop("_llm_tags", None) or []
+        worker_hint: str = str(payload.pop("_worker_hint", "") or "").strip()
+        # If LLM is confident about a specific worker kind, use it directly
+        if worker_hint:
+            registered_kinds = {w.get("worker_kind", "") for w in self.worker_registry.list_workers()}
+            if worker_hint in registered_kinds:
+                try:
+                    return WorkerKind(worker_hint)
+                except ValueError:
+                    # custom worker kind — set runtime key and return custom
+                    payload["_runtime_worker_key"] = worker_hint
+                    return WorkerKind.custom
+        details = self.worker_registry.select_worker_details(intent, payload, query, llm_tags=llm_tags or None)
         worker_kind = details["worker_kind"]
         best_score = details["best_score"]
         content_score = details["content_score"]
@@ -1508,6 +1561,20 @@ class QueenAgent:
 
     # Patterns that detect "save results to a file" post-processing intent
     _SAVE_TO_FILE_PATTERNS: list[Any] = []
+    _UNVERIFIED_SAVE_CLAIM_RE = re.compile(
+        r"(?i)(?:report|file)?\s*(?:has\s+been\s+|was\s+)?saved\s+(?:to|at)\s+[`'\"]?[^`'\"\n]+(?:\.\w+)?[`'\"]?"
+    )
+    _SAVE_PATH_SECTION_RE = re.compile(
+        r"(?is)\n*#{1,6}[^\n]*(?:file path information|path information|exact file path)[^\n]*\n.*?(?=\n#{1,6}\s|\Z)"
+    )
+    _SAVE_CLAIM_LINE_RE = re.compile(
+        r"(?im)^.*\b(?:saved|stored|written|mirrored|prepared)\b.*(?:path|file|report).*$"
+    )
+    _PATH_NOTE_LINE_RE = re.compile(
+        r"(?im)^.*(?:/home/|~/|[a-zA-Z]:\\|`[^`\n]+(?:\.md|\.txt|\.json|\.csv|\.html)`).*$"
+    )
+    _SAVE_VERB_RE = re.compile(r"(?i)\b(save|write|export|store)\b")
+    _FILE_HINT_RE = re.compile(r"(?i)(?:\bfile\b|markdown|text|\.(?:md|txt|json|csv|html|rst)\b)")
 
     @classmethod
     def _build_save_to_file_patterns(cls) -> None:
@@ -1515,33 +1582,123 @@ class QueenAgent:
             # "save it in a markdown file", "save it as report.md", "save to file.txt"
             re.compile(r'save\s+(?:it\s+)?(?:in|as|to)\s+(?:a\s+)?(?:markdown\s+file|(?:(?:a\s+)?(?:[\w\-]+\.(md|txt|json|csv|html|rst))))(?:\s+named?\s+["\']?(?P<fname>[\w\-\.]+)["\']?)?', re.IGNORECASE),
             # "and save it in a markdown file named foo.md"
-            re.compile(r'save\s+(?:it\s+)?(?:in|as|to)\s+(?:a\s+)?(?:markdown|text|md)\s+file\s+(?:named?\s+)?["\']?(?P<fname>[\w\-\.]+\.(?:md|txt|json|csv|html))["\']?', re.IGNORECASE),
+            re.compile(
+                r'save\s+(?:(?:it|the\s+(?:results?|report|output|data))\s+)?'
+                r'(?:in|as|to)\s+(?:an?\s+)?(?:markdown|text|\.?md)\s+file\s+'
+                r'(?:named?\s+)?["\']?(?P<fname>[\w\-\.]+\.(?:md|txt|json|csv|html))["\']?',
+                re.IGNORECASE,
+            ),
+            # "save it in local as foo.md", "save report locally as foo.md"
+            re.compile(
+                r'save\s+(?:(?:it|the\s+(?:results?|report|output|data))\s+)?'
+                r'(?:in\s+(?:local|locally)|locally)\s+as\s+["\']?(?P<fname>[\w\-\.]+\.(?:md|txt|json|csv|html))["\']?',
+                re.IGNORECASE,
+            ),
             # "write (/save) the results/report/output to foo.md"
             re.compile(r'(?:write|save)\s+(?:the\s+)?(?:results?|report|output|data|findings?|info(?:rmation)?)\s+(?:to|as|into?)\s+["\']?(?P<fname>[\w\-\.]+\.(?:md|txt|json|csv|html))["\']?', re.IGNORECASE),
             # "create a report ... save ..."  with explicit filename anywhere
             re.compile(r'\b(?:save|write|export|store)\s+(?:it\s+)?(?:to|as|in(?:to)?)\s+["\']?(?P<fname>[\w\-\.]+\.(?:md|txt|json|csv|html))["\']?', re.IGNORECASE),
+            # "make/create/generate a report file in/at downloads" (no explicit filename)
+            re.compile(
+                r'(?:make|create|generate|write|produce)\s+(?:a\s+)?(?:report|summary|notes?|file)\s+(?:file\s+)?'
+                r'(?:for\s+me\s+)?(?:in|at|to|into)\s+(?:the\s+)?'
+                r'(?P<dir>downloads?(?:\s+dir(?:ectory)?)?|download\s+(?:dir(?:ectory)?|folder)|~/\S+)',
+                re.IGNORECASE,
+            ),
+            # "put/store a report in downloads folder"
+            re.compile(
+                r'(?:put|store|place|save)\s+(?:a\s+)?(?:report|summary|notes?|results?|output)\s+'
+                r'(?:file\s+)?(?:in|at|into)\s+(?:the\s+)?'
+                r'(?P<dir>downloads?(?:\s+dir(?:ectory)?)?|download\s+(?:dir(?:ectory)?|folder)|~/\S+)',
+                re.IGNORECASE,
+            ),
         ]
 
     @classmethod
     def _extract_save_to_file_request(cls, query: str) -> tuple[bool, str]:
-        """Return (should_save, filename). filename may be auto-generated if not specified."""
+        """Return (should_save, filepath). filepath is absolute when a directory is captured."""
         if not cls._SAVE_TO_FILE_PATTERNS:
             cls._build_save_to_file_patterns()
+        stopwords = {"a","an","the","and","or","to","in","as","is","it","for","of","on","at","by","from","with","that","this","go","create","make","generate","save","write","report","file","please","can","you","me"}
         for pattern in cls._SAVE_TO_FILE_PATTERNS:
             m = pattern.search(query)
             if m:
+                groups = m.groupdict()
+                # Directory-based patterns — resolve to absolute path + auto filename
+                dir_match = groups.get("dir")
+                if dir_match:
+                    dir_lower = dir_match.strip().lower()
+                    if "download" in dir_lower:
+                        base = Path.home() / "Downloads"
+                    else:
+                        base = Path(dir_match).expanduser()
+                    words = re.findall(r'\b[a-zA-Z0-9_\-]+\b', query.lower())
+                    slug_words = [w for w in words if w not in stopwords][:4]
+                    fname = ("_".join(slug_words) or "report") + ".md"
+                    return True, str(base / fname)
+                # Explicit filename patterns
                 try:
-                    fname = m.group("fname")
+                    fname = groups.get("fname") or m.group("fname")
                 except IndexError:
                     fname = None
                 if not fname:
-                    # Auto-generate a filename based on keywords in the query
                     words = re.findall(r'\b[a-zA-Z0-9_\-]+\b', query.lower())
-                    stopwords = {"a","an","the","and","or","to","in","as","is","it","for","of","on","at","by","from","with","that","this","go","create","make","generate","save","write","report","file","please","can","you","me"}
                     slug_words = [w for w in words if w not in stopwords][:4]
                     fname = ("_".join(slug_words) or "report") + ".md"
+                fname = fname.rstrip(".,;:!?")
                 return True, fname
         return False, ""
+
+    @classmethod
+    def _query_requests_file_save(cls, query: str) -> bool:
+        return bool(cls._SAVE_VERB_RE.search(query) and cls._FILE_HINT_RE.search(query))
+
+    @classmethod
+    def _remove_unverified_save_claims(cls, text: str) -> str:
+        cleaned = cls._SAVE_PATH_SECTION_RE.sub("\n", text or "")
+        cleaned = cls._UNVERIFIED_SAVE_CLAIM_RE.sub("", cleaned)
+        lines: list[str] = []
+        for line in cleaned.splitlines():
+            if cls._SAVE_CLAIM_LINE_RE.search(line):
+                continue
+            if cls._PATH_NOTE_LINE_RE.search(line) and any(
+                marker in line.lower() for marker in ("path", "saved", "stored", "mirrored", "report has been prepared")
+            ):
+                continue
+            if cls._PATH_NOTE_LINE_RE.search(line) and line.strip().startswith(("**`", "`")):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def _canonicalize_save_reply(
+        cls,
+        existing: str,
+        *,
+        save_requested: bool,
+        save_succeeded: bool,
+        save_path: Path | None,
+    ) -> str:
+        if not save_requested:
+            return existing
+        cleaned = cls._remove_unverified_save_claims(existing or "")
+        if save_succeeded and save_path is not None:
+            suffix = f"\n\n---\n\n**Report saved to:** `{save_path}`"
+            return (cleaned + suffix) if cleaned else f"Report saved to `{save_path}`"
+        failure = "I could not save the requested file. Please try again with a writable path."
+        if not cleaned:
+            return failure
+        if cleaned.endswith((".", "!", "?")):
+            return f"{cleaned}\n\n{failure}"
+        return f"{cleaned}.\n\n{failure}"
+
+    @staticmethod
+    def _response_slot(output: dict[str, Any]) -> tuple[str, str]:
+        for key in ("assistant_reply", "answer", "summary", "text", "synthesis"):
+            value = output.get(key)
+            if isinstance(value, str):
+                return key, value
+        return "assistant_reply", ""
 
     # (operation, compiled_regex, path_group, content_group_or_None)
     _FILE_ACTION_PATTERNS: list[tuple[str, Any, int, int | None]] = []
@@ -1566,12 +1723,34 @@ class QueenAgent:
         """
         if not cls._FILE_ACTION_PATTERNS:
             cls._build_file_action_patterns()
+        lower_query = query.lower()
+        save_requested, _ = cls._extract_save_to_file_request(query)
         for op, pattern, path_grp, content_grp in cls._FILE_ACTION_PATTERNS:
             m = pattern.search(query)
             if m:
                 result: dict[str, Any] = {"operation": op, "file_path": m.group(path_grp).strip()}
                 if content_grp is not None:
-                    result["content"] = m.group(content_grp).strip()
+                    content = m.group(content_grp).strip()
+                    # Avoid false-positive parse for prompts like:
+                    # "create a report ... and save it in local as report.md".
+                    # In these cases, "it in local" is not intended file content.
+                    if op in {"write", "append"}:
+                        collapsed = " ".join(content.lower().split())
+                        pronoun_starts = (
+                            "it",
+                            "it in",
+                            "the report",
+                            "the output",
+                            "the results",
+                            "report",
+                            "results",
+                            "output",
+                        )
+                        looks_like_placeholder = collapsed.startswith(pronoun_starts)
+                        looks_like_save_phrase = (" save " in f" {lower_query} " and " as " in f" {lower_query} ")
+                        if looks_like_placeholder and (save_requested or looks_like_save_phrase):
+                            return None
+                    result["content"] = content
                 return result
         return None
 
@@ -1598,6 +1777,8 @@ class QueenAgent:
         # File / directory operations must be delegated, not answered in direct chat
         query = str(payload.get("query") or payload.get("topic") or "").strip()
         if query and self._infer_file_action(query):
+            return True
+        if query and self._extract_save_to_file_request(query)[0]:
             return True
         if query and _looks_like_shell_task(query):
             return True
@@ -1817,8 +1998,10 @@ class QueenAgent:
                     queen_context = load_queen_context(self.config.honeycomb_root)
                     domains = payload.get("domains") or []
                     domain = str(domains[0]) if isinstance(domains, list) and domains else ""
+                    dynamic_workers = self.worker_registry.format_workers_for_prompt()
                     queen_context = render_queen_context(
-                        queen_context, intent=intent, domain=domain, worker_kind=""
+                        queen_context, intent=intent, domain=domain, worker_kind="",
+                        available_workers=dynamic_workers,
                     )
                     # Inject Queen memories and semantic search for full platform stack
                     query_or_intent = str(payload.get("query") or payload.get("topic") or intent).strip()
@@ -1848,16 +2031,12 @@ class QueenAgent:
                         query, system=queen_context, messages=messages or None, model_override=model_override
                     )
                     if assistant_reply is None:
-                        if self.config.llm_provider == "gemini":
-                            assistant_reply = (
-                                "I could not reach Gemini right now. "
-                                "Check BEEKEEPER_GEMINI_API_KEY, billing/quota, and API access."
-                            )
-                        else:
-                            assistant_reply = (
-                                "I could not reach Ollama right now. "
-                                "Set BEEKEEPER_OLLAMA_BASE_URL and ensure Ollama is running."
-                            )
+                        providers = resolve_llm_providers()
+                        assistant_reply = (
+                            "I could not reach any configured LLM provider. "
+                            f"Resolved provider chain: {','.join(providers)}. "
+                            "Check provider credentials and endpoint configuration."
+                        )
                     output = {
                         "query": query,
                         "evidence": [],
@@ -1911,6 +2090,26 @@ class QueenAgent:
                     payload["_semantic_context"] = [text for _, text in semantic_hits if text and text.strip()][:5]
                 if md_hits:
                     payload["_md_memory_context"] = md_hits[:6]
+            # LLM-assisted intent classification: enrich routing before decomposing
+            _classify_query = str(payload.get("query") or payload.get("topic") or intent).strip()
+            if _classify_query:
+                llm_classification = self._classify_intent_with_llm(_classify_query, payload)
+                if llm_classification.get("intent"):
+                    intent = llm_classification["intent"]
+                if llm_classification.get("tags"):
+                    payload["_llm_tags"] = llm_classification["tags"]
+                if llm_classification.get("worker_hint"):
+                    payload["_worker_hint"] = llm_classification["worker_hint"]
+                self.honeycomb.write_event(
+                    queen_trace_id,
+                    {
+                        "kind": "llm_classification",
+                        "intent": llm_classification.get("intent", ""),
+                        "worker_hint": llm_classification.get("worker_hint", ""),
+                        "tags": llm_classification.get("tags", []),
+                        "needs_delegation": llm_classification.get("needs_delegation"),
+                    },
+                )
             tasks = self.decompose_intent(queen_trace_id, queen_request_id, intent, payload)
             results: list[ResultEnvelope] = []
             for task in tasks:
@@ -1974,8 +2173,36 @@ class QueenAgent:
                         success=monitor_decision.action == "accept",
                     )
                     if monitor_decision.action == "accept":
+                        log_service_call(
+                            "queen",
+                            "completed",
+                            source=source or "unknown",
+                            trace_id=queen_trace_id,
+                            resource=f"task:{task.task_id}",
+                            outcome="success",
+                            extra={
+                                "worker_kind": str(task.worker_kind),
+                                "monitor_action": monitor_decision.action,
+                                "monitor_reason": monitor_decision.reason,
+                                "quality_score": monitor_decision.quality_score,
+                            },
+                        )
                         break
                     if monitor_decision.action == "escalate":
+                        log_service_call(
+                            "queen",
+                            "failed",
+                            source=source or "unknown",
+                            trace_id=queen_trace_id,
+                            resource=f"task:{task.task_id}",
+                            outcome="failure",
+                            error=monitor_decision.reason,
+                            extra={
+                                "worker_kind": str(task.worker_kind),
+                                "monitor_action": monitor_decision.action,
+                                "quality_score": monitor_decision.quality_score,
+                            },
+                        )
                         break
                     if attempts > max(self.config.max_reruns, task.max_retries):
                         break
@@ -1992,6 +2219,9 @@ class QueenAgent:
             # Post-processing: if user requested saving results to a file, do it now
             _orig_query = str(payload.get("query") or payload.get("topic") or intent).strip()
             _should_save, _save_fname = self._extract_save_to_file_request(_orig_query)
+            _save_succeeded = False
+            _save_path: Path | None = None
+            _save_error: str | None = None
             if _should_save and results:
                 try:
                     # Collect all assistant replies into one markdown document
@@ -2005,19 +2235,56 @@ class QueenAgent:
                                 break
                     if _parts:
                         _file_content = "\n\n---\n\n".join(_parts)
-                        _save_path = Path(_save_fname) if Path(_save_fname).is_absolute() else Path(os.getcwd()) / _save_fname
+                        _save_path = Path(_save_fname).expanduser()
+                        if not _save_path.is_absolute():
+                            _save_path = Path(os.getcwd()) / _save_fname
                         _save_path.parent.mkdir(parents=True, exist_ok=True)
                         _save_path.write_text(_file_content, encoding="utf-8")
+                        _save_succeeded = True
                         _emit(f"Saved report to {_save_path}")
                         self.honeycomb.write_event(
                             queen_trace_id,
                             {"kind": "file_saved", "path": str(_save_path), "bytes": len(_file_content.encode())},
                         )
                 except Exception as _exc:
+                    _save_error = str(_exc)
                     self.honeycomb.write_event(
                         queen_trace_id,
-                        {"kind": "file_save_error", "error": str(_exc)},
+                        {"kind": "file_save_error", "error": _save_error},
                     )
+
+            _save_requested = self._query_requests_file_save(_orig_query)
+            if results and _save_requested:
+                for _res in results:
+                    _out = _res.output if hasattr(_res, "output") else {}
+                    if not isinstance(_out, dict):
+                        continue
+                    _slot, _existing = self._response_slot(_out)
+                    _out[_slot] = self._canonicalize_save_reply(
+                        _existing,
+                        save_requested=True,
+                        save_succeeded=_save_succeeded,
+                        save_path=_save_path,
+                    )
+                self.honeycomb.write_event(
+                    queen_trace_id,
+                    {
+                        "kind": "save_reply_canonicalized",
+                        "status": "success" if _save_succeeded else "failed",
+                        "verified_path": str(_save_path) if _save_path is not None else "",
+                        "error": _save_error or "",
+                    },
+                )
+                log_service_call(
+                    "queen",
+                    "completed" if _save_succeeded else "failed",
+                    source=source or "unknown",
+                    trace_id=queen_trace_id,
+                    resource="report_save_canonicalization",
+                    outcome="success" if _save_succeeded else "failure",
+                    error=_save_error if not _save_succeeded else None,
+                    extra={"save_requested": True, "save_path": str(_save_path) if _save_path else ""},
+                )
 
             return {
                 "trace_id": queen_trace_id,
