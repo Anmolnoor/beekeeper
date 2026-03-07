@@ -27,8 +27,10 @@ beekeeper run --scheduler auto --vector memory --query "best agent sdk patterns"
 ## Support and Maturity
 
 - Supported production path target: Postgres + Temporal + S3-compatible object storage + policy mediation + OpenTelemetry.
+- Storage tiers are explicit: dev/local JSONL+filesystem, prod metadata Postgres, prod event/log pipeline, object artifacts, and Qdrant for vectors.
 - Current channel focus: Slack depth first; other channels are available but not considered equally hardened.
 - Worker forge/generation: experimental until full promotion, sandboxing, and provenance gates are met.
+- Credibility posture: experimental worker forge, prototype dashboard, logical multi-tenancy, unit-tested core with limited live integration coverage.
 - Detailed status: [docs/support-matrix.md](docs/support-matrix.md), [docs/maturity-model.md](docs/maturity-model.md), [docs/risks-and-known-gaps.md](docs/risks-and-known-gaps.md)
 
 ## What makes Beekeeper different
