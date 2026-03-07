@@ -49,6 +49,28 @@ The repo is materially advanced, but the roadmap's target production path is not
 - add worker build/version metadata, rollout checks, rollback checks, and release-gate enforcement for the supported production path
 - keep worker forge frozen as experimental and implement the promotion pipeline before any further forge expansion
 
+
+## Remaining-work TODO list (requested update)
+
+Status snapshot for the four priority tracks:
+
+1. **Priority 1 — Split the Queen**: `PARTIAL`
+   - [x] `response_aggregation_service` extracted and wired.
+   - [x] Added explicit coordinator services for planning, policy, dispatch, execution-mode selection, and worker forge orchestration.
+   - [ ] Continue reducing `queen.py` by moving context and approval orchestration into dedicated service modules.
+
+2. **Priority 2 — Honest layered storage story**: `PARTIAL`
+   - [x] Storage tiers documented explicitly (dev/local JSONL/filesystem, prod metadata Postgres, prod event/log pipeline, artifact object storage, vector Qdrant).
+   - [ ] Runtime still needs full production backend enforcement and migration off local-first defaults.
+
+3. **Priority 3 — Harden security defaults**: `PARTIAL`
+   - [x] Non-dev startup validation now fails closed for webhook secret sets, replay window, secret rotation policy, tenant secret scoping, and tool credential boundaries.
+   - [x] Replay-protection configuration validated as required in non-dev mode.
+   - [ ] Implement managed rotation orchestration and fully scoped secret backends in runtime execution path.
+
+4. **Priority 4 — Narrow claims**: `DONE`
+   - [x] Documentation now explicitly claims: experimental worker forge, prototype dashboard, logical multi-tenancy, and unit-tested core with limited live integration coverage.
+
 ## Phase 0 - Baseline, Truth, and Focus
 
 Status: `PARTIAL`
