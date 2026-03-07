@@ -4,14 +4,12 @@ import hashlib
 import json
 import os
 import re
-import socket
 import threading
 import time
 from asyncio import run as asyncio_run
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
 from uuid import uuid4
 
 from .contracts import (
@@ -76,7 +74,6 @@ from .tool_adapters import register_action_tools, register_worker_tools
 from .tool_runtime import ToolExecutionPolicy, ToolExecutor, ToolLoopEngine, ToolRegistry
 from .llm_provider import build_llm_router
 from .runtime_env import resolve_llm_providers, resolve_searxng_base_url
-from .config import RuntimeMode, resolve_runtime_mode
 from .governance import (
     CapabilityManifestRegistry,
     build_policy_adapter,
@@ -236,6 +233,8 @@ class QueenAgent:
         )
         self.dispatch_service = DispatchService(
             config=DispatchConfig(
+                scheduler_backend=self.config.scheduler_backend,
+                celery_broker_url=self.config.celery_broker_url,
                 temporal_endpoint=self.config.temporal_endpoint,
                 temporal_namespace=self.config.temporal_namespace,
                 temporal_task_queue=self.config.temporal_task_queue,
@@ -389,117 +388,6 @@ class QueenAgent:
         )
 
     @staticmethod
-    def _is_tcp_reachable(host: str, port: int, timeout_seconds: float = 0.35) -> bool:
-        try:
-            with socket.create_connection((host, port), timeout=timeout_seconds):
-                return True
-        except Exception:
-            return False
-
-    @staticmethod
-    def _endpoint_host_port(endpoint: str, default_port: int) -> tuple[str, int]:
-        value = (endpoint or "").strip()
-        if "://" in value:
-            parsed = urlparse(value)
-            host = parsed.hostname or "localhost"
-            port = parsed.port or default_port
-            return host, int(port)
-        if ":" in value:
-            host, port_text = value.rsplit(":", 1)
-            try:
-                return host, int(port_text)
-            except ValueError:
-                return host or "localhost", default_port
-        return value or "localhost", default_port
-
-    def _can_connect_celery(self) -> bool:
-        host, port = self._endpoint_host_port(self.config.celery_broker_url, 6379)
-        return self._is_tcp_reachable(host, port)
-
-    def _can_connect_temporal(self) -> bool:
-        if not TEMPORAL_AVAILABLE:
-            return False
-        host, port = self._endpoint_host_port(self.config.temporal_endpoint, 7233)
-        return self._is_tcp_reachable(host, port)
-
-    @staticmethod
-    def _payload_prefers_temporal(payload: dict[str, Any]) -> bool:
-        if payload.get("require_durable") is True:
-            return True
-        if payload.get("long_running") is True:
-            return True
-        durability = str(payload.get("durability", "")).strip().lower()
-        if durability in {"high", "strict", "durable"}:
-            return True
-        if payload.get("workflow") is not None:
-            return True
-        try:
-            expected_seconds = float(payload.get("expected_runtime_seconds", 0))
-        except (TypeError, ValueError):
-            expected_seconds = 0.0
-        return expected_seconds >= 90.0
-
-    def _resolve_scheduler_backend(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        requested = str(self.config.scheduler_backend or "inline").strip().lower()
-        runtime_mode = resolve_runtime_mode()
-        if requested in {"inline", "celery", "temporal"}:
-            if requested == "inline" and runtime_mode is not RuntimeMode.DEV:
-                temporal_ready = self._can_connect_temporal()
-                celery_ready = self._can_connect_celery()
-                if temporal_ready:
-                    return "temporal", {
-                        "requested": requested,
-                        "selected": "temporal",
-                        "reason": "inline_disallowed_non_dev_temporal_selected",
-                        "runtime_mode": runtime_mode.value,
-                        "celery_ready": celery_ready,
-                        "temporal_ready": temporal_ready,
-                    }
-                if celery_ready:
-                    return "celery", {
-                        "requested": requested,
-                        "selected": "celery",
-                        "reason": "inline_disallowed_non_dev_celery_selected",
-                        "runtime_mode": runtime_mode.value,
-                        "celery_ready": celery_ready,
-                        "temporal_ready": temporal_ready,
-                    }
-                raise RuntimeError("inline_scheduler_not_allowed_in_non_dev_without_queue_backend")
-            return requested, {"requested": requested, "selected": requested, "reason": "explicit_scheduler"}
-        if requested != "auto":
-            return "inline", {
-                "requested": requested,
-                "selected": "inline",
-                "reason": "unknown_scheduler_fallback",
-            }
-
-        prefers_temporal = self._payload_prefers_temporal(payload)
-        celery_ready = self._can_connect_celery()
-        temporal_ready = self._can_connect_temporal()
-        if prefers_temporal and temporal_ready:
-            selected = "temporal"
-            reason = "durability_hint_and_temporal_ready"
-        elif prefers_temporal and celery_ready:
-            selected = "celery"
-            reason = "durability_hint_temporal_unavailable_using_celery"
-        elif celery_ready:
-            selected = "celery"
-            reason = "queue_ready_default"
-        elif temporal_ready:
-            selected = "temporal"
-            reason = "celery_unavailable_using_temporal"
-        else:
-            selected = "inline"
-            reason = "queue_unavailable_fallback_inline"
-        return selected, {
-            "requested": requested,
-            "selected": selected,
-            "reason": reason,
-            "prefers_temporal": prefers_temporal,
-            "celery_ready": celery_ready,
-            "temporal_ready": temporal_ready,
-        }
-
     def _seed_defaults(self) -> None:
         self.registry.register_skill(
             SkillProfile(
@@ -1858,7 +1746,7 @@ class QueenAgent:
         queen_trace_id = str(payload.get("_trace_id") or f"trace_{uuid4().hex}")
         queen_request_id = str(payload.get("_request_id") or str(uuid4()))
         admission_recorded = bool(payload.get("_admission_recorded"))
-        scheduler_backend, scheduler_decision = self._resolve_scheduler_backend(payload)
+        scheduler_backend, scheduler_decision = self.dispatch_service.resolve_scheduler_backend(payload)
 
         def _record_run_state(state: str, details: dict[str, Any] | None = None) -> None:
             try:
