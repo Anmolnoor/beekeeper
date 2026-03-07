@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from beekeeper.audit_logger import log_service_call
+from beekeeper.config import format_runtime_validation_errors, resolve_runtime_mode, validate_runtime_config
 from beekeeper.queen import QueenAgent, QueenConfig
 from beekeeper.runtime_env import resolve_runtime_context
 
@@ -30,6 +31,16 @@ def _load_env() -> None:
 
 
 _load_env()
+
+
+def _enforce_runtime_config() -> None:
+    report = validate_runtime_config(resolve_runtime_mode())
+    if report.ok:
+        return
+    raise RuntimeError(format_runtime_validation_errors(report))
+
+
+_enforce_runtime_config()
 
 app = FastAPI(title="Queen API", version="0.1.0", description="OpenAI-compatible adapter for Beekeeper Queen agent")
 

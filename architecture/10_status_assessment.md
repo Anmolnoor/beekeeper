@@ -87,7 +87,7 @@ All services defined and configured:
 |-------|---------|
 | **beehive→beekeeper rename uncommitted** | Git shows ~50 deleted `beehive/*` files and new `beekeeper/*` files. The old package is deleted but the change isn't committed. |
 | **Docker stack is down** | No containers running. Full stack needs 7+ containers. |
-| **Ollama URL hardcoded to Tailscale IP** | `.env.example` defaults to `100.99.106.59:11434` — only works if that machine is on the Tailscale network. |
+| **Ollama URL should stay environment-specific** | Keep `BEEKEEPER_OLLAMA_BASE_URL` in local `.env`; `.env.example` now defaults to `http://localhost:11434`. |
 
 ### Testing Gaps
 

@@ -190,10 +190,10 @@ beekeeper init-tenant --org "Acme" --hive "Ops Hive"
 Copy `.env.example` to `.env` and configure. Key variables:
 
 **LLM**
-- `BEEKEEPER_LLM_PROVIDER` (default `ollama`) — Primary provider: `ollama`, `gemini`, `openai`
-- `BEEKEEPER_LLM_PROVIDERS` — Comma-separated fallback chain (e.g. `ollama,gemini`)
+- `BEEKEEPER_LLM_PROVIDER` (default `openai`) — Primary provider: `ollama`, `gemini`, `openai`
+- `BEEKEEPER_LLM_PROVIDERS` — Comma-separated fallback chain (e.g. `openai,gemini,ollama`)
 - Precedence: `BEEKEEPER_LLM_PROVIDERS` overrides `BEEKEEPER_LLM_PROVIDER`.
-- CLI/session env overrides (for example `BEEKEEPER_LLM_PROVIDER=ollama beekeeper run ...`) take precedence over `.env`.
+- CLI/session env overrides (for example `BEEKEEPER_LLM_PROVIDER=openai beekeeper run ...`) take precedence over `.env`.
 - `BEEKEEPER_OLLAMA_BASE_URL`, `BEEKEEPER_OLLAMA_MODEL`, `BEEKEEPER_OLLAMA_TIMEOUT_SECONDS`
 - `BEEKEEPER_GEMINI_API_KEY`, `BEEKEEPER_GEMINI_MODEL`, `BEEKEEPER_GEMINI_TIMEOUT_SECONDS`
 - `BEEKEEPER_OPENAI_API_KEY`, `BEEKEEPER_OPENAI_MODEL`, `BEEKEEPER_OPENAI_BASE_URL`, `BEEKEEPER_OPENAI_TIMEOUT_SECONDS`
@@ -223,5 +223,5 @@ Copy `.env.example` to `.env` and configure. Key variables:
 - **Command not found for `beekeeper`** — Re-run `pip install -e .` in your active environment.
 - **Upgrade beekeeper** — Run `beekeeper update` or `pip install --upgrade beekeeper-agent-platform`.
 - **Ollama check fails** — Verify `BEEKEEPER_OLLAMA_BASE_URL` is reachable from your machine.
-- **Expected Ollama but got Gemini/OpenAI** — Set both `BEEKEEPER_LLM_PROVIDER=ollama` and `BEEKEEPER_LLM_PROVIDERS=ollama` for single-provider runs, or order your chain explicitly (for example `ollama,gemini`).
+- **Expected Ollama but got Gemini/OpenAI** — Set both `BEEKEEPER_LLM_PROVIDER=ollama` and `BEEKEEPER_LLM_PROVIDERS=ollama` for single-provider runs, or order your chain explicitly (for example `openai,gemini,ollama`).
 - **LLM provider check fails** — Ensure API keys are set for `gemini`/`openai` when used in `BEEKEEPER_LLM_PROVIDERS`.

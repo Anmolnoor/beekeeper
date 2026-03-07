@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .contracts import AgentBlueprint
 from .security import append_signed_audit_log
+from .secret_manager import build_secret_provider, is_secret_reference
 from .tenancy import HoneycombRecord, HiveRecord, OrganizationRecord, QueenInstanceRecord, UserOrgRole, UserRecord
 from .vector_store import VectorStore, build_vector_store
 
@@ -233,7 +234,11 @@ class BeekeeperStore:
         encrypted = dict(payload)
         for key in self._CHANNEL_SECRET_KEYS:
             if key in encrypted and encrypted[key]:
-                encrypted[key] = encrypt_secret(str(encrypted[key]))
+                raw_value = str(encrypted[key])
+                if is_secret_reference(raw_value):
+                    encrypted[key] = raw_value
+                else:
+                    encrypted[key] = encrypt_secret(raw_value)
         body = {"channel": channel, "payload": encrypted, "updated_at": _utcnow_iso()}
         self._write_json(self.root / "channels" / f"{channel}.json", body)
 
@@ -257,9 +262,18 @@ class BeekeeperStore:
         body = self._read_json(path)
         payload = body.get("payload", {})
         decrypted = dict(payload)
+        secret_provider = None
         for key in self._CHANNEL_SECRET_KEYS:
             if key in decrypted and decrypted[key] and decrypted[key] != "***":
-                decrypted[key] = decrypt_secret(str(decrypted[key]))
+                raw_value = str(decrypted[key])
+                if is_secret_reference(raw_value):
+                    try:
+                        secret_provider = secret_provider or build_secret_provider()
+                        decrypted[key] = secret_provider.resolve(raw_value)
+                    except Exception:
+                        decrypted[key] = raw_value
+                else:
+                    decrypted[key] = decrypt_secret(raw_value)
         return decrypted
 
     def append_audit_event(self, kind: str, payload: dict[str, Any]) -> None:

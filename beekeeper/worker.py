@@ -42,8 +42,10 @@ from .contracts import (
 )
 from .honeycomb import HoneycombConfig, HoneycombStore
 from .llm_provider import LLMRouter, build_llm_router
+from .sandbox_profiles import enforce_sandbox_profile
 from .tracing import Tracer
 from .web_adapters import SearxngAdapter, WebAdapterError
+from .governance.capability_manifests import CapabilityManifest
 
 
 def _utcnow() -> datetime:
@@ -100,6 +102,7 @@ class WorkerContext:
     abilities: AbilitiesProfile | None = None
     accountability: AccountabilityPolicy | None = None
     guardrails: GuardrailProfile | None = None
+    capability_manifest: CapabilityManifest | None = None
     status_callback: Callable[[str], None] | None = None
 
 
@@ -135,8 +138,8 @@ class WebSearchWorker(BaseSpecialistWorker):
     
     def __init__(
         self,
-        llm_provider: str = "ollama",
-        llm_providers: str | None = None,
+        llm_provider: str = "openai",
+        llm_providers: str | None = "openai,gemini,ollama",
         ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "llama3.2",
         ollama_timeout_seconds: int = 120,
@@ -149,7 +152,7 @@ class WebSearchWorker(BaseSpecialistWorker):
         openai_timeout_seconds: int = 120,
         searxng_base_url: str = "http://localhost:8080",
     ) -> None:
-        self.llm_provider = (llm_provider or "ollama").strip().lower()
+        self.llm_provider = (llm_provider or "openai").strip().lower()
         self.llm_router = build_llm_router(
             llm_provider=self.llm_provider,
             llm_providers=llm_providers,
@@ -327,8 +330,8 @@ class ForgedWorker(BaseSpecialistWorker):
 
     def __init__(
         self,
-        llm_provider: str = "ollama",
-        llm_providers: str | None = None,
+        llm_provider: str = "openai",
+        llm_providers: str | None = "openai,gemini,ollama",
         ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
         ollama_timeout_seconds: int = 120,
@@ -340,7 +343,7 @@ class ForgedWorker(BaseSpecialistWorker):
         openai_base_url: str | None = None,
         openai_timeout_seconds: int = 120,
     ) -> None:
-        self.llm_provider = (llm_provider or "ollama").strip().lower()
+        self.llm_provider = (llm_provider or "openai").strip().lower()
         self.llm_router = build_llm_router(
             llm_provider=self.llm_provider,
             llm_providers=llm_providers,
@@ -837,9 +840,9 @@ class WorkerRuntime:
         self,
         honeycomb: HoneycombStore,
         tracer: Tracer,
-        llm_provider: str = "ollama",
-        llm_providers: str | None = None,
-        ollama_base_url: str = "http://100.99.106.59:11434",
+        llm_provider: str = "openai",
+        llm_providers: str | None = "openai,gemini,ollama",
+        ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
         ollama_timeout_seconds: int = 120,
         gemini_api_key: str = "",
@@ -933,6 +936,19 @@ class WorkerRuntime:
         ):
             task.status = Status.running
             self.honeycomb.write_task(task)
+            sandbox_profile = enforce_sandbox_profile(task)
+            self.honeycomb.write_event(
+                task.queen_trace_id,
+                {
+                    "kind": "sandbox_profile",
+                    "task_id": task.task_id,
+                    "profile": sandbox_profile.name,
+                    "allow_network": sandbox_profile.allow_network,
+                    "allow_secret_resolution": sandbox_profile.allow_secret_resolution,
+                    "read_only_filesystem": sandbox_profile.read_only_filesystem,
+                    "max_runtime_seconds": sandbox_profile.max_runtime_seconds,
+                },
+            )
             runtime_worker_key = str(task.payload.get("_runtime_worker_key", "")).strip()
             worker_key = task.worker_kind
             if runtime_worker_key and runtime_worker_key in self._workers:
@@ -1009,9 +1025,9 @@ def execute_task_serialized(
     vector_backend: str = "memory",
     vector_collection: str = "honeycomb_memory",
     vector_url: str = "http://localhost:6333",
-    llm_provider: str = "ollama",
-    llm_providers: str | None = None,
-    ollama_base_url: str = "http://100.99.106.59:11434",
+    llm_provider: str = "openai",
+    llm_providers: str | None = "openai,gemini,ollama",
+    ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
     ollama_timeout_seconds: int = 120,
     gemini_api_key: str = "",
@@ -1038,6 +1054,11 @@ def execute_task_serialized(
         guardrails=(
             GuardrailProfile.model_validate(context_payload["guardrails"])
             if isinstance(context_payload.get("guardrails"), dict)
+            else None
+        ),
+        capability_manifest=(
+            CapabilityManifest.from_dict(context_payload["capability_manifest"])
+            if isinstance(context_payload.get("capability_manifest"), dict)
             else None
         ),
     )

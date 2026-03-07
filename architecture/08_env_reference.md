@@ -23,12 +23,12 @@ All environment variables used by the platform. Set them in `.env` (loaded autom
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BEEKEEPER_LLM_PROVIDERS` | _(not set)_ | Comma-separated ordered list: `ollama,gemini,openai` |
-| `BEEKEEPER_LLM_PROVIDER` | `ollama` | Legacy single-provider setting (overridden by `BEEKEEPER_LLM_PROVIDERS`) |
+| `BEEKEEPER_LLM_PROVIDERS` | `openai,gemini,ollama` | Comma-separated ordered list: `openai,gemini,ollama` |
+| `BEEKEEPER_LLM_PROVIDER` | `openai` | Legacy single-provider setting (overridden by `BEEKEEPER_LLM_PROVIDERS`) |
 
 > In `docker-compose.yml`, several services set
-> `BEEKEEPER_LLM_PROVIDERS=${BEEKEEPER_LLM_PROVIDERS:-gemini,ollama}`, so the
-> compose default order is Gemini first, then Ollama.
+> `BEEKEEPER_LLM_PROVIDERS=${BEEKEEPER_LLM_PROVIDERS:-openai,gemini,ollama}`, so the
+> compose default order is OpenAI first, then Gemini, then Ollama.
 >
 > Runtime precedence:
 > 1) Explicit process environment
@@ -43,7 +43,7 @@ All environment variables used by the platform. Set them in `.env` (loaded autom
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BEEKEEPER_OLLAMA_BASE_URL` | `http://100.99.106.59:11434` | Ollama server base URL |
+| `BEEKEEPER_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server base URL |
 | `BEEKEEPER_OLLAMA_MODEL` | `catsarethebest/qwen2.5-N2:1.5b` | Default model |
 | `BEEKEEPER_OLLAMA_TIMEOUT_SECONDS` | `120` | Request timeout |
 | `BEEKEEPER_OLLAMA_MODEL_ECONOMY` | _(unset)_ | Model for economy tier |
@@ -134,8 +134,8 @@ All environment variables used by the platform. Set them in `.env` (loaded autom
 
 ```bash
 # LLM
-BEEKEEPER_LLM_PROVIDERS=ollama,gemini
-BEEKEEPER_OLLAMA_BASE_URL=http://100.99.106.59:11434
+BEEKEEPER_LLM_PROVIDERS=openai,gemini,ollama
+BEEKEEPER_OLLAMA_BASE_URL=http://localhost:11434
 BEEKEEPER_OLLAMA_MODEL=catsarethebest/qwen2.5-N2:1.5b
 BEEKEEPER_OLLAMA_TIMEOUT_SECONDS=120
 BEEKEEPER_GEMINI_API_KEY=your-gemini-key

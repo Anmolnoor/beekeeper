@@ -1,6 +1,6 @@
 # Beekeeper Agent Platform
 
-**Governed agent runtime with tool-level policy enforcement:** Queen orchestrates tasks, every tool call is checked against guardrails, and Honeycomb stores traces and approvals.
+**Governed agent runtime with tool-level policy enforcement:** Queen orchestrates tasks, and every tool call is checked against guardrails. Honeycomb is used as a developer-friendly trace/audit adapter (not authoritative production state).
 
 ## Quick Start (5 min)
 
@@ -21,8 +21,15 @@ beekeeper run --scheduler auto --vector memory --query "best agent sdk patterns"
 
 - **Queen** — Planner/router that decomposes intents into tasks and delegates to workers.
 - **Workers** — Ephemeral specialists: `web_search`, `heavy_compute`, `audit`, and `forged` (for unmatched intents).
-- **Honeycomb** — Append-only store for events, artifacts, traces, and HITL approvals.
+- **Honeycomb** — Developer-friendly append-only timeline for traces/events and local debugging.
 - **Tools** — Model-driven tool loop (ToolLoopEngine) with policy checks; optional MCP servers (stdio/HTTP) for external tools.
+
+## Support and Maturity
+
+- Supported production path target: Postgres + Temporal + S3-compatible object storage + policy mediation + OpenTelemetry.
+- Current channel focus: Slack depth first; other channels are available but not considered equally hardened.
+- Worker forge/generation: experimental until full promotion, sandboxing, and provenance gates are met.
+- Detailed status: [docs/support-matrix.md](docs/support-matrix.md), [docs/maturity-model.md](docs/maturity-model.md), [docs/risks-and-known-gaps.md](docs/risks-and-known-gaps.md)
 
 ## What makes Beekeeper different
 
@@ -39,6 +46,7 @@ beekeeper run --scheduler auto --vector memory --query "best agent sdk patterns"
 | `beekeeper chat` | Interactive chat |
 | `beekeeper run --query "..."` | Single query |
 | `beekeeper doctor` | Service health |
+| `beekeeper smoke-test` | Minimal end-to-end run + persistence check |
 | `beekeeper review list` | Pending HITL approvals |
 | `beekeeper review approve <id> --resume` | Approve and resume task |
 | `beekeeper init-tenant --org X --hive Y` | Create tenant |
@@ -54,7 +62,8 @@ Starts Redis, Temporal, Qdrant, SearXNG, Celery, Queen API (8788), Open WebUI (3
 
 ## Channels
 
-- **Slack, Telegram, Discord** — Webhooks via `beekeeper channels set`. See [docs/CHANNEL_ALLOWLISTS.md](docs/CHANNEL_ALLOWLISTS.md).
+- **Slack** — primary supported channel path.
+- **Telegram, Discord** — available, currently treated as experimental depth.
 - **WhatsApp** — Cloud API; supports text and audio/voice (transcription via OpenAI Whisper if `BEEKEEPER_OPENAI_API_KEY` set).
 
 ## Dashboard
@@ -66,6 +75,8 @@ Open `http://localhost:8788/dashboard` (or 8787 in Docker). Sign in to manage ch
 High-risk actions (e.g. `payment_action`, `data_delete`) require human approval. Pending items appear in the dashboard and via `beekeeper review list`. Approve via API: `POST /api/approvals/{id}/approve`. Push notifications to WhatsApp/Telegram when configured (`hitl_notify_chat_id`, `hitl_notify_phone`).
 
 ## Worker Forge
+
+Worker forge is currently **experimental**.
 
 When no worker matches an intent (no content match), Queen auto-forges a custom worker on demand by:
 - registering a `custom_*` worker profile in the worker registry,

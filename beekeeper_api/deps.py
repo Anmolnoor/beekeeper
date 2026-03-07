@@ -23,7 +23,16 @@ def get_store() -> BeekeeperStore:
 
 def get_honeycomb(honeycomb_root: str = ".honeycomb") -> HoneycombStore:
     root = _resolve_root("BEEKEEPER_HONEYCOMB_ROOT", honeycomb_root)
-    return HoneycombStore(HoneycombConfig(root_dir=root))
+    return HoneycombStore(
+        HoneycombConfig(
+            root_dir=root,
+            durable_state_backend=os.getenv("BEEKEEPER_DATABASE_BACKEND") or None,
+            durable_state_dsn=os.getenv("BEEKEEPER_DATABASE_DSN") or None,
+            artifact_backend=os.getenv("BEEKEEPER_ARTIFACT_BACKEND", "local"),
+            artifact_bucket=os.getenv("BEEKEEPER_OBJECT_STORAGE_BUCKET") or None,
+            artifact_endpoint=os.getenv("BEEKEEPER_OBJECT_STORAGE_ENDPOINT") or None,
+        )
+    )
 
 
 def get_worker_registry(honeycomb_root: str = ".honeycomb") -> WorkerRegistry:

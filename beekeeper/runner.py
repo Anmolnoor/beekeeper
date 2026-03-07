@@ -67,6 +67,12 @@ def _load_env_early() -> None:
 
 from .honeycomb import HoneycombConfig, HoneycombStore
 from .ops import compute_ops_metrics, send_alert_webhook
+from .config import (
+    ConfigValidationError,
+    format_runtime_validation_errors,
+    resolve_runtime_mode,
+    validate_runtime_config,
+)
 from .audit_compliance import (
     create_integrity_checkpoints,
     reconcile_audit_trace_links,
@@ -99,8 +105,9 @@ def _build_config(
         vector_backend=args.vector,
         vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
         vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
-        llm_provider=os.getenv("BEEKEEPER_LLM_PROVIDER", "ollama"),
-        ollama_base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://100.99.106.59:11434"),
+        llm_provider=os.getenv("BEEKEEPER_LLM_PROVIDER", "openai"),
+        llm_providers=os.getenv("BEEKEEPER_LLM_PROVIDERS", "openai,gemini,ollama"),
+        ollama_base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
         ollama_model=os.getenv("BEEKEEPER_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
         ollama_timeout_seconds=int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")),
         gemini_api_key=os.getenv("BEEKEEPER_GEMINI_API_KEY", ""),
@@ -354,6 +361,40 @@ class DoctorCheck:
     details: str
 
 
+_MODE_BYPASS_COMMANDS = {
+    None,
+    "doctor",
+    "quickstart",
+    "setup",
+    "version",
+    "commands",
+}
+
+
+def _runtime_mode_check(command: str | None) -> DoctorCheck:
+    mode = resolve_runtime_mode()
+    report = validate_runtime_config(mode)
+    if report.ok:
+        return DoctorCheck(name="runtime_mode", ok=True, details=f"{mode.value} mode validated")
+    if command in _MODE_BYPASS_COMMANDS:
+        return DoctorCheck(
+            name="runtime_mode",
+            ok=False,
+            details=f"{mode.value} mode has {len(report.errors)} critical config error(s)",
+        )
+    return DoctorCheck(name="runtime_mode", ok=False, details=format_runtime_validation_errors(report))
+
+
+def _enforce_runtime_mode_or_exit(command: str | None) -> None:
+    if command in _MODE_BYPASS_COMMANDS:
+        return
+    mode = resolve_runtime_mode()
+    report = validate_runtime_config(mode)
+    if report.ok:
+        return
+    raise ConfigValidationError(format_runtime_validation_errors(report))
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -576,7 +617,7 @@ def _collect_doctor_checks() -> list[DoctorCheck]:
     broker_url = os.getenv("BEEKEEPER_CELERY_BROKER_URL", "redis://localhost:6379/0")
     temporal_endpoint = os.getenv("BEEKEEPER_TEMPORAL_ENDPOINT", "localhost:7233")
     vector_url = os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333")
-    ollama_url = os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://100.99.106.59:11434")
+    ollama_url = os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434")
     searxng_url = resolve_searxng_base_url(runtime_context="local")
 
     redis_host, redis_port = _parse_host_port_from_url(broker_url, default_port=6379)
@@ -587,6 +628,7 @@ def _collect_doctor_checks() -> list[DoctorCheck]:
         temporal_host, temporal_port = temporal_endpoint, 7233
 
     checks = [
+        _runtime_mode_check("doctor"),
         _check_tcp("redis", redis_host, redis_port),
         _check_tcp("temporal", temporal_host, temporal_port),
         _check_http("qdrant", vector_url.rstrip("/") + "/readyz"),
@@ -645,6 +687,57 @@ def _run_doctor(auto_start: bool = False, json_output: bool = False) -> int:
         return 1
     print(f"doctor summary: all {len(checks)} checks passed")
     return 0
+
+
+def _run_smoke_test(args: argparse.Namespace) -> int:
+    """Run a minimal end-to-end local path against Queen and Honeycomb persistence."""
+    honeycomb_root = Path(getattr(args, "honeycomb_root", ".honeycomb"))
+    cfg = QueenConfig(
+        honeycomb_root=honeycomb_root,
+        scheduler_backend="inline",
+        vector_backend="memory",
+        max_reruns=0,
+    )
+    try:
+        queen = QueenAgent(cfg)
+        out = queen.run(
+            intent="research_topic",
+            payload={"query": "beekeeper smoke test"},
+            source="smoke-test",
+        )
+        trace_id = str(out.get("trace_id", "")).strip()
+        results = out.get("results", [])
+        has_results = isinstance(results, list) and len(results) > 0
+        if not trace_id or not has_results:
+            print("[FAIL] smoke-test: run completed but required outputs are missing.")
+            print(json.dumps({"trace_id": trace_id, "has_results": has_results}, ensure_ascii=True, indent=2))
+            return 1
+        store = HoneycombStore(HoneycombConfig(root_dir=honeycomb_root))
+        events = store.read_events(trace_id)
+        if not events:
+            print("[FAIL] smoke-test: trace persisted without events.")
+            print(json.dumps({"trace_id": trace_id}, ensure_ascii=True, indent=2))
+            return 1
+        summary = {
+            "trace_id": trace_id,
+            "results_count": len(results),
+            "events_count": len(events),
+            "mode": resolve_runtime_mode().value,
+        }
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": True, "summary": summary}, ensure_ascii=True, indent=2))
+        else:
+            print("[OK] smoke-test passed")
+            print(json.dumps(summary, ensure_ascii=True, indent=2))
+        return 0
+    except Exception as exc:
+        payload = {"ok": False, "error": str(exc)}
+        if getattr(args, "json", False):
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+        else:
+            print("[FAIL] smoke-test failed")
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return 1
 
 
 def _update_env_key(project_root: Path, key: str, value: str) -> None:
@@ -748,14 +841,14 @@ def _run_setup_wizard(non_interactive: bool = False) -> int:
         org_name = "Default Organization"
         hive_name = "Main Hive"
         honeycomb_root = ".honeycomb"
-        llm_provider = "ollama"
+        llm_provider = "openai,gemini,ollama"
     else:
         print("Step 2: First-time tenant setup")
         org_name = input("Organization name [Default Organization]: ").strip() or "Default Organization"
         hive_name = input("Hive name [Main Hive]: ").strip() or "Main Hive"
         honeycomb_root = input("Honeycomb root path [.honeycomb]: ").strip() or ".honeycomb"
-        print("LLM provider: ollama (local), gemini, openai, or comma-separated for fallback (e.g. ollama,gemini)")
-        llm_choice = input("LLM provider(s) [ollama]: ").strip().lower() or "ollama"
+        print("LLM provider: ollama (local), gemini, openai, or comma-separated for fallback (e.g. openai,gemini,ollama)")
+        llm_choice = input("LLM provider(s) [openai,gemini,ollama]: ").strip().lower() or "openai,gemini,ollama"
         llm_provider = llm_choice
         _update_env_key(project_root, "BEEKEEPER_LLM_PROVIDERS", llm_provider)
         if "gemini" in llm_provider or "openai" in llm_provider:
@@ -890,6 +983,7 @@ def _run_commands_list() -> None:
         ("run", "Run a Queen request (--query, --payload)"),
         ("chat", "Interactive Queen chat"),
         ("doctor", "Health checks (--auto-start)"),
+        ("smoke-test", "Minimal run + persistence verification"),
         ("up", "Start Docker services (--with-workers, --with-open-webui)"),
         ("down", "Stop Docker services"),
         ("ps", "Show container status"),
@@ -922,6 +1016,8 @@ def _print_command_guide() -> None:
           Checks runtime health and auto-starts required Docker services if needed.
       - beekeeper doctor [--auto-start]
           Runs health checks for redis, temporal, qdrant, ollama, and searxng.
+      - beekeeper smoke-test [--honeycomb-root .honeycomb]
+          Runs a minimal end-to-end request and verifies trace persistence.
       - beekeeper up [--with-workers]
           Starts required infra containers; optionally starts worker containers too.
       - beekeeper up --with-open-webui
@@ -1652,6 +1748,9 @@ def main() -> None:
         dest="doctor_json",
         help="Output checks as JSON for scripting.",
     )
+    smoke_parser = subparsers.add_parser("smoke-test", help="Run minimal end-to-end smoke validation")
+    smoke_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    smoke_parser.add_argument("--json", action="store_true", help="Output machine-readable summary")
 
     up_parser = subparsers.add_parser("up", help="Start docker compose services")
     up_parser.add_argument(
@@ -1825,6 +1924,12 @@ def main() -> None:
     status_parser.add_argument("--once", action="store_true", help="Print once and exit (no live refresh)")
 
     args = parser.parse_args()
+    try:
+        _enforce_runtime_mode_or_exit(args.command)
+    except ConfigValidationError as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        raise SystemExit(2)
+
     if args.command is None:
         exit_code = _run_doctor(auto_start=True)
         _print_command_guide()
@@ -1843,6 +1948,8 @@ def main() -> None:
         raise SystemExit(_run_chat_loop(args))
     if args.command == "doctor":
         raise SystemExit(_run_doctor(auto_start=args.auto_start, json_output=getattr(args, "doctor_json", False)))
+    if args.command == "smoke-test":
+        raise SystemExit(_run_smoke_test(args))
     if args.command == "up":
         display_cmd = _compose_cmd_for_display(
             ["up", "-d", "redis", "temporal", "qdrant", "searxng"]

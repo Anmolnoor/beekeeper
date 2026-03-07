@@ -62,13 +62,23 @@ from .worker_registry import WorkerRegistry
 from .queen_context import build_context_bundle, ensure_queen_context_file, load_queen_context, render_queen_context
 from .skill_loader import load_skills_from_md
 from .autonomy import AutonomyPolicy, DEFAULT_AUTONOMY_POLICY
-from .user_policy import UserPolicy, load_user_policy, merge_policy_into_autonomy
+from .profile_service import ProfileService
+from .response_aggregation_service import ResponseAggregationService
+from .user_policy import UserPolicy
 from .queen_updates import write_queen_update
 from .queen_actions import ActionContext, QueenActionLoop, build_default_action_registry
 from .tool_adapters import register_action_tools, register_worker_tools
 from .tool_runtime import ToolExecutionPolicy, ToolExecutor, ToolLoopEngine, ToolRegistry
 from .llm_provider import build_llm_router
 from .runtime_env import resolve_llm_providers, resolve_searxng_base_url
+from .config import RuntimeMode, resolve_runtime_mode
+from .governance import (
+    CapabilityManifestRegistry,
+    build_policy_adapter,
+    adapter_decision_to_policy,
+    build_manifest_from_skill_rule,
+)
+from .governance.tool_broker import LocalToolBroker
 
 
 _SHELL_TASK_KEYWORDS = re.compile(
@@ -109,8 +119,8 @@ class QueenConfig:
     vector_collection: str = "honeycomb_memory"
     vector_url: str = "http://localhost:6333"
     queen_soul_profile_id: str = "soul.queen.crown"
-    llm_provider: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDER", "ollama"))
-    llm_providers: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDERS", ""))
+    llm_provider: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDER", "openai"))
+    llm_providers: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDERS", "openai,gemini,ollama"))
     ollama_base_url: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"))
     ollama_model: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OLLAMA_MODEL", "llama3.2"))
     ollama_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")))
@@ -143,6 +153,11 @@ class QueenAgent:
                 vector_backend=config.vector_backend,
                 vector_collection=config.vector_collection,
                 vector_url=config.vector_url,
+                durable_state_dsn=os.getenv("BEEKEEPER_DATABASE_DSN") or None,
+                durable_state_backend=os.getenv("BEEKEEPER_DATABASE_BACKEND") or None,
+                artifact_backend=os.getenv("BEEKEEPER_ARTIFACT_BACKEND", "local"),
+                artifact_bucket=os.getenv("BEEKEEPER_OBJECT_STORAGE_BUCKET") or None,
+                artifact_endpoint=os.getenv("BEEKEEPER_OBJECT_STORAGE_ENDPOINT") or None,
             )
         )
         builtin_guardrails: list[Any] = [
@@ -177,6 +192,8 @@ class QueenAgent:
         self.scheduler = self._build_scheduler()
         self.worker_registry = WorkerRegistry(config.honeycomb_root)
         self.worker_registry.ensure_registry_file()
+        self.capability_manifests = CapabilityManifestRegistry()
+        self.policy_adapter = build_policy_adapter()
         ensure_queen_context_file(config.honeycomb_root)
         self._seed_defaults()
         queen_blueprint = self.registry.get_blueprint(self.config.queen_blueprint_id)
@@ -199,6 +216,8 @@ class QueenAgent:
             openai_timeout_seconds=self.config.openai_timeout_seconds,
         )
         self._plugin_reload_lock = threading.Lock()
+        self.profile_service = ProfileService()
+        self.response_aggregation_service = ResponseAggregationService()
         self._tool_registry: ToolRegistry | None = None
         self._tool_executor: ToolExecutor | None = None
         self._tool_loop_engine: ToolLoopEngine | None = None
@@ -232,15 +251,26 @@ class QueenAgent:
             )
 
             def _tool_guardrail(tool_name: str, arguments: dict[str, Any]) -> tuple[bool, str | None, bool]:
-                from .guardrails import evaluate_tool_call
                 rule = self.registry.resolve_profiles(self.config.queen_blueprint_id).rule
-                return evaluate_tool_call(tool_name, arguments, rule)
+                manifest = self.capability_manifests.get(self.config.queen_blueprint_id)
+                decision = self.policy_adapter.evaluate_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    rule_profile=rule,
+                    capability_manifest=manifest,
+                )
+                if decision.decision == "deny":
+                    return False, ",".join(decision.reason_codes) if decision.reason_codes else "tool_policy_denied", False
+                if decision.decision == "escalate":
+                    return True, None, True
+                return True, None, False
 
             self._tool_executor = ToolExecutor(
                 self._tool_registry,
                 honeycomb=self.honeycomb,
                 policy=policy,
                 tool_guardrail_fn=_tool_guardrail,
+                tool_broker=LocalToolBroker(self.honeycomb),
             )
             self._tool_loop_engine = ToolLoopEngine(self._tool_executor, policy=policy)
             try:
@@ -352,7 +382,30 @@ class QueenAgent:
 
     def _resolve_scheduler_backend(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         requested = str(self.config.scheduler_backend or "inline").strip().lower()
+        runtime_mode = resolve_runtime_mode()
         if requested in {"inline", "celery", "temporal"}:
+            if requested == "inline" and runtime_mode is not RuntimeMode.DEV:
+                temporal_ready = self._can_connect_temporal()
+                celery_ready = self._can_connect_celery()
+                if temporal_ready:
+                    return "temporal", {
+                        "requested": requested,
+                        "selected": "temporal",
+                        "reason": "inline_disallowed_non_dev_temporal_selected",
+                        "runtime_mode": runtime_mode.value,
+                        "celery_ready": celery_ready,
+                        "temporal_ready": temporal_ready,
+                    }
+                if celery_ready:
+                    return "celery", {
+                        "requested": requested,
+                        "selected": "celery",
+                        "reason": "inline_disallowed_non_dev_celery_selected",
+                        "runtime_mode": runtime_mode.value,
+                        "celery_ready": celery_ready,
+                        "temporal_ready": temporal_ready,
+                    }
+                raise RuntimeError("inline_scheduler_not_allowed_in_non_dev_without_queue_backend")
             return requested, {"requested": requested, "selected": requested, "reason": "explicit_scheduler"}
         if requested != "auto":
             return "inline", {
@@ -448,7 +501,7 @@ class QueenAgent:
                 hard_budget_usd=2.0,
                 max_runtime_seconds=120,
                 max_retries=2,
-                allowed_domains=["docs.python.org", "openai.com", "github.com"],
+                allowed_domains=["docs.python.org", "openai.com", "github.com", "linkedin.com"],
                 disallowed_tools=["shell_exec_unscoped"],
                 require_human_approval_for=["data_delete", "payment_action"],
             )
@@ -519,6 +572,17 @@ class QueenAgent:
                 is_template=True,
             )
         )
+        queen_resolved = self.registry.resolve_profiles("blueprint.queen.default")
+        self.capability_manifests.register(
+            build_manifest_from_skill_rule(
+                manifest_id="manifest.queen.default",
+                subject_id="blueprint.queen.default",
+                worker_kind=WorkerKind.web_search,
+                skill=self.registry.get_skill("skill.research.web"),
+                rule=queen_resolved.rule,
+                sandbox_tier=0,
+            )
+        )
         self.registry.register_blueprint(
             AgentBlueprint(
                 blueprint_id="blueprint.worker.context_curator",
@@ -535,6 +599,17 @@ class QueenAgent:
                 ),
                 tags=["worker", "memory", "context"],
                 is_template=True,
+            )
+        )
+        context_resolved = self.registry.resolve_profiles("blueprint.worker.context_curator")
+        self.capability_manifests.register(
+            build_manifest_from_skill_rule(
+                manifest_id="manifest.worker.context_curator",
+                subject_id="blueprint.worker.context_curator",
+                worker_kind=WorkerKind.context_curator,
+                skill=self.registry.get_skill("skill.context.curator"),
+                rule=context_resolved.rule,
+                sandbox_tier=0,
             )
         )
         self.registry.register_blueprint(
@@ -555,6 +630,17 @@ class QueenAgent:
                 is_template=True,
             )
         )
+        web_resolved = self.registry.resolve_profiles("blueprint.worker.web")
+        self.capability_manifests.register(
+            build_manifest_from_skill_rule(
+                manifest_id="manifest.worker.web",
+                subject_id="blueprint.worker.web",
+                worker_kind=WorkerKind.web_search,
+                skill=self.registry.get_skill("skill.research.web"),
+                rule=web_resolved.rule,
+                sandbox_tier=0,
+            )
+        )
         self.registry.register_blueprint(
             AgentBlueprint(
                 blueprint_id="blueprint.worker.heavy",
@@ -573,6 +659,17 @@ class QueenAgent:
                 is_template=True,
             )
         )
+        heavy_resolved = self.registry.resolve_profiles("blueprint.worker.heavy")
+        self.capability_manifests.register(
+            build_manifest_from_skill_rule(
+                manifest_id="manifest.worker.heavy",
+                subject_id="blueprint.worker.heavy",
+                worker_kind=WorkerKind.heavy_compute,
+                skill=self.registry.get_skill("skill.compute.heavy"),
+                rule=heavy_resolved.rule,
+                sandbox_tier=1,
+            )
+        )
         self.registry.register_blueprint(
             AgentBlueprint(
                 blueprint_id="blueprint.worker.audit",
@@ -589,6 +686,17 @@ class QueenAgent:
                 ),
                 tags=["worker", "audit"],
                 is_template=True,
+            )
+        )
+        audit_resolved = self.registry.resolve_profiles("blueprint.worker.audit")
+        self.capability_manifests.register(
+            build_manifest_from_skill_rule(
+                manifest_id="manifest.worker.audit",
+                subject_id="blueprint.worker.audit",
+                worker_kind=WorkerKind.audit,
+                skill=self.registry.get_skill("skill.monitor.audit"),
+                rule=audit_resolved.rule,
+                sandbox_tier=0,
             )
         )
 
@@ -1284,6 +1392,7 @@ class QueenAgent:
         elif task.worker_kind == WorkerKind.forged:
             blueprint_id = self.config.worker_web_blueprint_id
         resolved = self.registry.resolve_profiles(blueprint_id)
+        capability_manifest = self.capability_manifests.get(blueprint_id)
         worker_id = make_worker_identity(
             agent_type=f"worker.{task.task_type}",
             skill_profile_id=skill_id,
@@ -1297,6 +1406,7 @@ class QueenAgent:
             abilities=resolved.abilities,
             accountability=resolved.accountability,
             guardrails=resolved.guardrails,
+            capability_manifest=capability_manifest,
             status_callback=status_callback,
         )
 
@@ -1379,7 +1489,14 @@ class QueenAgent:
                 "early_stop": bool(policy_task.payload.get("early_stop", False)),
             },
         )
-        policy = self.guardrail_engine.evaluate(policy_task, context.rule)
+        base_policy = self.guardrail_engine.evaluate(policy_task, context.rule)
+        adapter_decision = self.policy_adapter.evaluate_task(
+            task=policy_task,
+            rule_profile=context.rule,
+            capability_manifest=context.capability_manifest,
+            base_policy=base_policy,
+        )
+        policy = adapter_decision_to_policy(policy_task.task_id, adapter_decision)
         policy = self._resolve_human_approval(policy_task, policy)
         self.honeycomb.write_policy_decision(policy, trace_id=task.queen_trace_id)
         if policy.status == "block":
@@ -1451,6 +1568,7 @@ class QueenAgent:
                         "abilities": context.abilities.model_dump(mode="json") if context.abilities else None,
                         "accountability": context.accountability.model_dump(mode="json") if context.accountability else None,
                         "guardrails": context.guardrails.model_dump(mode="json") if context.guardrails else None,
+                        "capability_manifest": context.capability_manifest.to_dict() if context.capability_manifest else None,
                     },
                     honeycomb_root=str(self.config.honeycomb_root.resolve()),
                     vector_backend=self.config.vector_backend,
@@ -1479,6 +1597,7 @@ class QueenAgent:
                     "abilities": context.abilities.model_dump(mode="json") if context.abilities else None,
                     "accountability": context.accountability.model_dump(mode="json") if context.accountability else None,
                     "guardrails": context.guardrails.model_dump(mode="json") if context.guardrails else None,
+                    "capability_manifest": context.capability_manifest.to_dict() if context.capability_manifest else None,
                 },
             )
             payload = scheduler.collect(job_id, timeout_seconds=self.config.scheduler_timeout_seconds)
@@ -1495,6 +1614,7 @@ class QueenAgent:
                     "abilities": context.abilities.model_dump(mode="json") if context.abilities else None,
                     "accountability": context.accountability.model_dump(mode="json") if context.accountability else None,
                     "guardrails": context.guardrails.model_dump(mode="json") if context.guardrails else None,
+                    "capability_manifest": context.capability_manifest.to_dict() if context.capability_manifest else None,
                 },
             )
             payload = scheduler.collect(job_id, timeout_seconds=self.config.scheduler_timeout_seconds)
@@ -1873,27 +1993,42 @@ class QueenAgent:
                 except Exception:
                     pass
 
-        queen_trace_id = f"trace_{uuid4().hex}"
-        queen_request_id = str(uuid4())
+        queen_trace_id = str(payload.get("_trace_id") or f"trace_{uuid4().hex}")
+        queen_request_id = str(payload.get("_request_id") or str(uuid4()))
+        admission_recorded = bool(payload.get("_admission_recorded"))
         scheduler_backend, scheduler_decision = self._resolve_scheduler_backend(payload)
+
+        def _record_run_state(state: str, details: dict[str, Any] | None = None) -> None:
+            try:
+                self.honeycomb.record_run_state(
+                    trace_id=queen_trace_id,
+                    request_id=queen_request_id,
+                    intent=intent,
+                    state=state,
+                    source=source or "unknown",
+                    payload={"scheduler_backend": scheduler_backend},
+                    details=details,
+                )
+            except Exception:
+                pass
+
+        if not admission_recorded:
+            _record_run_state("requested")
         log_service_call("queen", "called", source=source or "unknown", trace_id=queen_trace_id)
         # Reset per-request mutable state
         self.tracer.reset()
         self.autonomy_policy = self.config.autonomy_policy or DEFAULT_AUTONOMY_POLICY
-        # Load per-user policy and merge into autonomy policy for this request
-        _user_policy = None
-        user_id = str(payload.get("user_id", "")).strip()
-        if user_id:
-            try:
-                import os as _os
-                _store_root = _os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store")
-                _user_policy = load_user_policy(_store_root, user_id)
-                self.autonomy_policy = merge_policy_into_autonomy(_user_policy, self.config.autonomy_policy or DEFAULT_AUTONOMY_POLICY)
-            except Exception:
-                pass
+        profile_resolution = self.profile_service.resolve_autonomy_policy(
+            payload,
+            default_autonomy_policy=self.config.autonomy_policy or DEFAULT_AUTONOMY_POLICY,
+        )
+        _user_policy = profile_resolution.user_policy
+        self.autonomy_policy = profile_resolution.autonomy_policy
         if session_id and not self.honeycomb.sessions_dir.joinpath(f"{session_id}.json").exists():
             session_id = None
         with self.tracer.span(queen_trace_id, "queen.run") as queen_span:
+            if not admission_recorded:
+                _record_run_state("admitted")
             if session_id:
                 self.honeycomb.link_trace_to_session(session_id, queen_trace_id, parent_trace_id=parent_trace_id)
             if source:
@@ -1942,21 +2077,22 @@ class QueenAgent:
                 )
                 # If payload says stop_after_actions=True (or no further delegation needed) return now
                 if payload.get("stop_after_actions", False):
-                    return {
-                        "trace_id": queen_trace_id,
-                        "request_id": queen_request_id,
-                        "queen_soul_profile_id": self.queen_soul.soul_profile_id,
-                        "ollama_base_url": self.config.ollama_base_url,
-                        "action_loop": action_result,
-                        "results": [],
-                        "trace_events": self.tracer.events,
-                        "semantic_hits_for_intent": self.honeycomb.semantic_search(intent),
-                    }
+                    _record_run_state("succeeded", {"path": "action_loop"})
+                    return self.response_aggregation_service.build_response(
+                        trace_id=queen_trace_id,
+                        request_id=queen_request_id,
+                        queen_soul_profile_id=self.queen_soul.soul_profile_id,
+                        ollama_base_url=self.config.ollama_base_url,
+                        action_loop=action_result,
+                        trace_events=self.tracer.events,
+                        semantic_hits_for_intent=self.honeycomb.semantic_search(intent),
+                    )
             if self.config.execution_mode in ("model_tools", "hybrid"):
                 tool_result = self._run_tool_loop(queen_trace_id, payload, status_callback)
                 if tool_result is not None:
                     if self.config.execution_mode == "model_tools" or tool_result.get("status") == "success":
                         cost = tool_result.get("cost_metrics") or {}
+                        _record_run_state("succeeded", {"path": "tool_loop"})
                         return {
                             "trace_id": queen_trace_id,
                             "request_id": queen_request_id,
@@ -2055,16 +2191,18 @@ class QueenAgent:
                         cost_metrics=CostMetrics(latency_ms=0, estimated_cost_usd=0.0),
                         output_schema="QueenDirectOutput",
                     )
-                    return {
-                        "trace_id": queen_trace_id,
-                        "request_id": queen_request_id,
-                        "queen_soul_profile_id": self.queen_soul.soul_profile_id,
-                        "ollama_base_url": self.config.ollama_base_url,
-                        "results": [result.model_dump(mode="json")],
-                        "trace_events": self.tracer.events,
-                        "semantic_hits_for_intent": self.honeycomb.semantic_search(intent),
-                    }
+                    _record_run_state("succeeded", {"path": "direct_chat"})
+                    return self.response_aggregation_service.build_response(
+                        trace_id=queen_trace_id,
+                        request_id=queen_request_id,
+                        queen_soul_profile_id=self.queen_soul.soul_profile_id,
+                        ollama_base_url=self.config.ollama_base_url,
+                        results=[result],
+                        trace_events=self.tracer.events,
+                        semantic_hits_for_intent=self.honeycomb.semantic_search(intent),
+                    )
             _emit("Decomposing request into executable tasks…")
+            _record_run_state("planning", {"path": "worker_delegation"})
             # Enrich payload with Queen memories and semantic context for workers
             query_or_intent = str(payload.get("query") or payload.get("topic") or intent).strip()
             if query_or_intent:
@@ -2111,6 +2249,8 @@ class QueenAgent:
                     },
                 )
             tasks = self.decompose_intent(queen_trace_id, queen_request_id, intent, payload)
+            _record_run_state("queued", {"task_count": len(tasks)})
+            _record_run_state("running")
             results: list[ResultEnvelope] = []
             for task in tasks:
                 _emit(self._WORKER_STATUS.get(task.worker_kind, "Executing task…"))
@@ -2286,15 +2426,17 @@ class QueenAgent:
                     extra={"save_requested": True, "save_path": str(_save_path) if _save_path else ""},
                 )
 
-            return {
-                "trace_id": queen_trace_id,
-                "request_id": queen_request_id,
-                "queen_soul_profile_id": self.queen_soul.soul_profile_id,
-                "ollama_base_url": self.config.ollama_base_url,
-                "results": [result.model_dump(mode="json") for result in results],
-                "trace_events": self.tracer.events,
-                "semantic_hits_for_intent": self.honeycomb.semantic_search(intent),
-            }
+            terminal_state = self.response_aggregation_service.terminal_state_for_results(results)
+            _record_run_state(terminal_state, {"result_count": len(results)})
+            return self.response_aggregation_service.build_response(
+                trace_id=queen_trace_id,
+                request_id=queen_request_id,
+                queen_soul_profile_id=self.queen_soul.soul_profile_id,
+                ollama_base_url=self.config.ollama_base_url,
+                results=results,
+                trace_events=self.tracer.events,
+                semantic_hits_for_intent=self.honeycomb.semantic_search(intent),
+            )
 
 
 def _summarize_run_result(result: dict[str, Any]) -> str:

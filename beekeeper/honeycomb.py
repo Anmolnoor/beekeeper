@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import queue as _queue
 import threading
@@ -27,6 +26,7 @@ def _broadcast_event(event: dict) -> None:
         for q in dead:
             _event_bus.remove(q)
 
+from .artifact_store import ArtifactStorageConfig, ArtifactStore, build_artifact_store
 from .contracts import (
     ArtifactRef,
     HumanReviewRecord,
@@ -38,6 +38,7 @@ from .contracts import (
     WorkerKind,
     WorkerPerformanceRecord,
 )
+from .data_plane.repositories import DurableStateRepositoryProtocol, build_durable_state_repository
 from .vector_store import VectorStore, build_vector_store
 
 
@@ -51,6 +52,15 @@ class HoneycombConfig:
     vector_backend: str = "memory"
     vector_collection: str = "honeycomb_memory"
     vector_url: str = "http://localhost:6333"
+    durable_state_enabled: bool = True
+    durable_state_backend: str | None = None
+    durable_state_dsn: str | None = None
+    durable_state_db_path: Path | None = None
+    artifact_backend: str = "local"
+    artifact_bucket: str | None = None
+    artifact_endpoint: str | None = None
+    artifact_prefix: str = "artifacts"
+    artifact_dev_mirror_root: Path | None = None
 
 
 class HoneycombStore:
@@ -75,6 +85,7 @@ class HoneycombStore:
         self.human_review_dir = self.root_dir / "human_review"
         self.backlog_dir = self.root_dir / "backlog"
         self.sessions_dir = self.root_dir / "sessions"
+        self.control_plane_db_path = config.durable_state_db_path or (self.root_dir / "control_plane.db")
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.governance_dir.mkdir(parents=True, exist_ok=True)
@@ -85,11 +96,32 @@ class HoneycombStore:
         self.human_review_dir.mkdir(parents=True, exist_ok=True)
         self.backlog_dir.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.object_store_dir = self.root_dir / "object_store"
+        self.object_store_dir.mkdir(parents=True, exist_ok=True)
         self.vector_store: VectorStore = build_vector_store(
             config.vector_backend,
             collection=config.vector_collection,
             url=config.vector_url,
         )
+        self.artifact_store: ArtifactStore = build_artifact_store(
+            default_root=self.object_store_dir,
+            config=ArtifactStorageConfig(
+                backend=config.artifact_backend,
+                local_root=self.object_store_dir,
+                bucket=config.artifact_bucket,
+                endpoint=config.artifact_endpoint,
+                prefix=config.artifact_prefix,
+                s3_dev_mirror_root=config.artifact_dev_mirror_root,
+            ),
+        )
+        self.durable_state: DurableStateRepositoryProtocol | None = None
+        if config.durable_state_enabled:
+            self.durable_state = build_durable_state_repository(
+                default_sqlite_path=self.control_plane_db_path,
+                backend=config.durable_state_backend,
+                dsn=config.durable_state_dsn,
+                sqlite_path=self.control_plane_db_path,
+            )
 
     def _append_jsonl(self, path: Path, row: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -187,7 +219,66 @@ class HoneycombStore:
         self._append_jsonl(self.events_dir / f"{trace_id}.jsonl", payload)
         _broadcast_event(payload)
 
+    def record_run_state(
+        self,
+        *,
+        trace_id: str,
+        request_id: str,
+        intent: str,
+        state: str,
+        source: str = "",
+        payload: dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if self.durable_state is not None:
+            self.durable_state.record_run_state(
+                trace_id=trace_id,
+                request_id=request_id,
+                intent=intent,
+                state=state,
+                source=source,
+                payload=payload,
+                details=details,
+            )
+            self.durable_state.enqueue_outbox(
+                event_type="run_state_changed",
+                aggregate_type="run",
+                aggregate_id=trace_id,
+                idempotency_key=f"run_state:{trace_id}:{state}",
+                payload={
+                    "trace_id": trace_id,
+                    "request_id": request_id,
+                    "intent": intent,
+                    "state": state,
+                },
+            )
+        self.write_event(
+            trace_id,
+            {
+                "kind": "run_state",
+                "state": state,
+                "request_id": request_id,
+                "intent": intent,
+                "source": source,
+                **(details or {}),
+            },
+        )
+
     def write_task(self, task: TaskEnvelope) -> None:
+        if self.durable_state is not None:
+            self.durable_state.record_task(task)
+            self.durable_state.enqueue_outbox(
+                event_type="task_state_changed",
+                aggregate_type="task",
+                aggregate_id=task.task_id,
+                idempotency_key=f"task_state:{task.task_id}:{task.status.value}",
+                payload={
+                    "trace_id": task.queen_trace_id,
+                    "task_id": task.task_id,
+                    "status": task.status.value,
+                    "worker_kind": task.worker_kind.value,
+                },
+            )
         self.write_event(
             task.queen_trace_id,
             {
@@ -206,6 +297,20 @@ class HoneycombStore:
             )
 
     def write_policy_decision(self, decision: PolicyDecision, trace_id: str) -> None:
+        if self.durable_state is not None:
+            self.durable_state.record_policy_decision(decision, trace_id=trace_id)
+            self.durable_state.enqueue_outbox(
+                event_type="policy_decision_recorded",
+                aggregate_type="task",
+                aggregate_id=decision.task_id,
+                idempotency_key=f"policy_decision:{decision.decision_id}",
+                payload={
+                    "trace_id": trace_id,
+                    "task_id": decision.task_id,
+                    "decision_id": decision.decision_id,
+                    "status": decision.status,
+                },
+            )
         self._append_jsonl(self.governance_dir / f"{trace_id}.jsonl", decision.model_dump(mode="json"))
         self.write_event(
             trace_id,
@@ -219,14 +324,30 @@ class HoneycombStore:
         )
 
     def write_artifact(self, trace_id: str, task_id: str, content: str, kind: str = "report") -> ArtifactRef:
-        artifact_id = str(uuid4())
-        artifact_path = self.artifacts_dir / f"{artifact_id}.txt"
-        artifact_path.write_text(content, encoding="utf-8")
-        checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        artifact = ArtifactRef(task_id=task_id, kind=kind, location=str(artifact_path), checksum=checksum)
+        artifact = self.artifact_store.write_text(
+            trace_id=trace_id,
+            task_id=task_id,
+            content=content,
+            kind=kind,
+        )
+        # Keep a local mirror for dev inspection and retention lifecycle tooling.
+        legacy_path = self.artifacts_dir / f"{artifact.artifact_id}.txt"
+        legacy_path.write_text(content, encoding="utf-8")
+        if self.durable_state is not None:
+            self.durable_state.record_artifact(artifact, trace_id=trace_id)
         self.write_event(
             trace_id,
-            {"kind": "artifact", "task_id": task_id, "artifact_id": artifact.artifact_id, "location": artifact.location},
+            {
+                "kind": "artifact",
+                "task_id": task_id,
+                "artifact_id": artifact.artifact_id,
+                "location": artifact.location,
+                "storage_backend": artifact.storage_backend,
+                "storage_bucket": artifact.storage_bucket,
+                "object_key": artifact.object_key,
+                "content_type": artifact.content_type,
+                "tenant_scope": artifact.tenant_scope,
+            },
         )
         return artifact
 
@@ -280,6 +401,21 @@ class HoneycombStore:
             payload=task.payload,
             status="pending",
         )
+        if self.durable_state is not None:
+            self.durable_state.create_review(review)
+            self.durable_state.enqueue_outbox(
+                event_type="approval_state_changed",
+                aggregate_type="approval",
+                aggregate_id=review.review_id,
+                idempotency_key=f"approval_state:{review.review_id}:{review.status}",
+                payload={
+                    "review_id": review.review_id,
+                    "task_id": review.task_id,
+                    "trace_id": review.trace_id,
+                    "status": review.status,
+                },
+            )
+        # Legacy mirror for compatibility with existing tooling.
         self._human_review_path(review.review_id).write_text(
             json.dumps(review.model_dump(mode="json"), ensure_ascii=True, indent=2),
             encoding="utf-8",
@@ -302,6 +438,10 @@ class HoneycombStore:
         return review
 
     def get_review(self, review_id: str) -> HumanReviewRecord | None:
+        if self.durable_state is not None:
+            review = self.durable_state.get_review(review_id)
+            if review is not None:
+                return review
         path = self._human_review_path(review_id)
         if not path.exists():
             return None
@@ -309,6 +449,10 @@ class HoneycombStore:
         return HumanReviewRecord.model_validate(payload)
 
     def list_pending_reviews(self) -> list[HumanReviewRecord]:
+        if self.durable_state is not None:
+            pending = self.durable_state.list_pending_reviews()
+            if pending:
+                return pending
         pending: list[HumanReviewRecord] = []
         for item in self.human_review_dir.glob("*.json"):
             payload = json.loads(item.read_text(encoding="utf-8"))
@@ -319,6 +463,10 @@ class HoneycombStore:
         return pending
 
     def find_review_for_task(self, task_id: str, pending_only: bool = False) -> HumanReviewRecord | None:
+        if self.durable_state is not None:
+            review = self.durable_state.find_review_for_task(task_id, pending_only=pending_only)
+            if review is not None:
+                return review
         for item in self.human_review_dir.glob("*.json"):
             payload = json.loads(item.read_text(encoding="utf-8"))
             record = HumanReviewRecord.model_validate(payload)
@@ -330,15 +478,32 @@ class HoneycombStore:
         return None
 
     def resolve_review(self, review_id: str, *, approved: bool, approver: str, note: str | None = None) -> HumanReviewRecord:
-        review = self.get_review(review_id)
-        if review is None:
-            raise KeyError(f"unknown_review_id={review_id}")
-        if review.status != "pending":
-            return review
-        review.status = "approved" if approved else "rejected"
-        review.resolved_by = approver
-        review.resolution_note = note
-        review.resolved_at = datetime.now(timezone.utc)
+        if self.durable_state is not None:
+            review = self.durable_state.resolve_review(review_id, approved=approved, approver=approver, note=note)
+            self.durable_state.enqueue_outbox(
+                event_type="approval_state_changed",
+                aggregate_type="approval",
+                aggregate_id=review.review_id,
+                idempotency_key=f"approval_state:{review.review_id}:{review.status}",
+                payload={
+                    "review_id": review.review_id,
+                    "task_id": review.task_id,
+                    "trace_id": review.trace_id,
+                    "status": review.status,
+                    "resolved_by": approver,
+                },
+            )
+        else:
+            review = self.get_review(review_id)
+            if review is None:
+                raise KeyError(f"unknown_review_id={review_id}")
+            if review.status != "pending":
+                return review
+            review.status = "approved" if approved else "rejected"
+            review.resolved_by = approver
+            review.resolution_note = note
+            review.resolved_at = datetime.now(timezone.utc)
+        # Legacy mirror for compatibility with existing tooling.
         self._human_review_path(review_id).write_text(
             json.dumps(review.model_dump(mode="json"), ensure_ascii=True, indent=2),
             encoding="utf-8",

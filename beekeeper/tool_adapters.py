@@ -16,6 +16,7 @@ from .contracts import (
 )
 from .queen_actions import ActionContext, QueenActionRegistry
 from .worker import WorkerContext, make_worker_identity
+from .idempotency import stable_idempotency_key
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +237,15 @@ def _make_worker_executor(worker_runtime: Any, honeycomb: Any, registry: Any) ->
             task_type=payload.get("task_type", "research_topic"),
             worker_kind=worker_kind,
             payload=payload,
-            idempotency_key=str(uuid4()),
+            idempotency_key=stable_idempotency_key(
+                "tool_run_worker",
+                {
+                    "trace_id": trace_id,
+                    "worker_kind": worker_kind.value,
+                    "task_type": payload.get("task_type", "research_topic"),
+                    "payload": payload,
+                },
+            ),
             status=Status.queued,
         )
         blueprint_id = "blueprint.worker.web"

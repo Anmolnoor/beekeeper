@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.scripts]
-beekeeper = "beekeeper.runner:main"
+beekeeper = "beekeeper.cli.main:main"
 beekeeper-api = "beekeeper_api.app:main"
 queen-api = "queen_api.app:main"
 
@@ -40,7 +40,7 @@ filterwarnings = [
 ]
 
 [tool.setuptools]
-packages = ["beekeeper", "beekeeper_api", "queen_api"]
+packages = ["beekeeper", "beekeeper.config", "beekeeper.data_plane", "beekeeper.data_plane.repositories", "beekeeper.cli", "beekeeper.cli.commands", "beekeeper_api", "queen_api"]
 
 [tool.setuptools.package-data]
 beekeeper = ["souls/*.json", "souls/*.md"]

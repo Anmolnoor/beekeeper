@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from beekeeper.queen import QueenAgent, QueenConfig
 from beekeeper_api.app import app
 
 
@@ -105,3 +106,23 @@ def test_governance_and_kpi_endpoints(monkeypatch, tmp_path) -> None:
     sessions = client.get("/api/roadmap/usability", headers=headers)
     assert sessions.status_code == 200
     assert len(sessions.json()["sessions"]) == 1
+
+
+def test_run_inspection_endpoint(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("BEEKEEPER_STORE_ROOT", str(tmp_path / "store"))
+    monkeypatch.setenv("BEEKEEPER_HONEYCOMB_ROOT", str(tmp_path / "honeycomb"))
+    honeycomb_root = tmp_path / "honeycomb"
+    queen = QueenAgent(QueenConfig(honeycomb_root=honeycomb_root, scheduler_backend="inline", max_reruns=0))
+    queen.worker_runtime.direct_chat = lambda query, system=None, messages=None, model_override=None: ("ok", "stub")  # type: ignore[assignment]
+    run = queen.run(intent="research_topic", payload={"query": "phase 4 inspection"})
+    trace_id = run["trace_id"]
+
+    client = TestClient(app)
+    headers = _auth_headers(client)
+    resp = client.get(f"/api/runs/{trace_id}/inspection?honeycomb_root={honeycomb_root}", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run"]["trace_id"] == trace_id
+    assert body["run"]["state"] == "succeeded"
+    assert len(body["run_state_timeline"]) >= 1
+    assert isinstance(body["tasks"], list)
