@@ -121,8 +121,8 @@ class QueenConfig:
     vector_collection: str = "honeycomb_memory"
     vector_url: str = "http://localhost:6333"
     queen_soul_profile_id: str = "soul.queen.crown"
-    llm_provider: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDER", "openai"))
-    llm_providers: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDERS", "openai,gemini,ollama"))
+    llm_provider: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDER", "ollama"))
+    llm_providers: str = field(default_factory=lambda: os.getenv("BEEKEEPER_LLM_PROVIDERS", "ollama,gemini,openai"))
     ollama_base_url: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"))
     ollama_model: str = field(default_factory=lambda: os.getenv("BEEKEEPER_OLLAMA_MODEL", "llama3.2"))
     ollama_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")))
@@ -387,7 +387,6 @@ class QueenAgent:
             )
         )
 
-    @staticmethod
     def _seed_defaults(self) -> None:
         self.registry.register_skill(
             SkillProfile(

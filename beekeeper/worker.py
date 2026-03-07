@@ -138,8 +138,8 @@ class WebSearchWorker(BaseSpecialistWorker):
     
     def __init__(
         self,
-        llm_provider: str = "openai",
-        llm_providers: str | None = "openai,gemini,ollama",
+        llm_provider: str = "ollama",
+        llm_providers: str | None = "ollama,gemini,openai",
         ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "llama3.2",
         ollama_timeout_seconds: int = 120,
@@ -330,8 +330,8 @@ class ForgedWorker(BaseSpecialistWorker):
 
     def __init__(
         self,
-        llm_provider: str = "openai",
-        llm_providers: str | None = "openai,gemini,ollama",
+        llm_provider: str = "ollama",
+        llm_providers: str | None = "ollama,gemini,openai",
         ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
         ollama_timeout_seconds: int = 120,
@@ -840,8 +840,8 @@ class WorkerRuntime:
         self,
         honeycomb: HoneycombStore,
         tracer: Tracer,
-        llm_provider: str = "openai",
-        llm_providers: str | None = "openai,gemini,ollama",
+        llm_provider: str = "ollama",
+        llm_providers: str | None = "ollama,gemini,openai",
         ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
         ollama_timeout_seconds: int = 120,
@@ -1025,8 +1025,8 @@ def execute_task_serialized(
     vector_backend: str = "memory",
     vector_collection: str = "honeycomb_memory",
     vector_url: str = "http://localhost:6333",
-    llm_provider: str = "openai",
-    llm_providers: str | None = "openai,gemini,ollama",
+    llm_provider: str = "ollama",
+    llm_providers: str | None = "ollama,gemini,openai",
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
     ollama_timeout_seconds: int = 120,
