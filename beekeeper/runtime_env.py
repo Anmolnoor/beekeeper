@@ -31,12 +31,12 @@ def resolve_searxng_base_url(*, runtime_context: str | None = None) -> str:
 
 
 def resolve_llm_providers() -> list[str]:
-    """Resolve provider chain with explicit precedence: providers -> provider -> openai,gemini,ollama."""
+    """Resolve provider chain with explicit precedence: providers -> provider -> ollama,gemini,openai."""
     raw = (os.getenv("BEEKEEPER_LLM_PROVIDERS") or "").strip()
     if not raw:
-        raw = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "openai,gemini,ollama").strip()
+        raw = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "ollama,gemini,openai").strip()
     providers = [p.strip().lower() for p in raw.split(",") if p.strip()]
-    return providers or ["openai", "gemini", "ollama"]
+    return providers or ["ollama", "gemini", "openai"]
 
 
 def validate_llm_provider_env() -> tuple[list[str], list[str], list[str]]:

@@ -679,7 +679,7 @@ def _get_setup_config(mask_secrets: bool = False) -> dict[str, Any]:
         return "***" if (mask_secrets and val) else (val or "")
 
     return {
-        "llm_provider": env.get("BEEKEEPER_LLM_PROVIDER") or os.environ.get("BEEKEEPER_LLM_PROVIDER", "openai"),
+        "llm_provider": env.get("BEEKEEPER_LLM_PROVIDER") or os.environ.get("BEEKEEPER_LLM_PROVIDER", "ollama"),
         "ollama_base_url": env.get("BEEKEEPER_OLLAMA_BASE_URL") or os.environ.get("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
         "ollama_model": env.get("BEEKEEPER_OLLAMA_MODEL") or os.environ.get("BEEKEEPER_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
         "gemini_api_key": _mask(env.get("BEEKEEPER_GEMINI_API_KEY") or os.environ.get("BEEKEEPER_GEMINI_API_KEY", "")),

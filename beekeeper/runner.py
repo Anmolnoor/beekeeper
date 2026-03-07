@@ -105,8 +105,8 @@ def _build_config(
         vector_backend=args.vector,
         vector_url=os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333"),
         vector_collection=os.getenv("BEEKEEPER_VECTOR_COLLECTION", "honeycomb_memory"),
-        llm_provider=os.getenv("BEEKEEPER_LLM_PROVIDER", "openai"),
-        llm_providers=os.getenv("BEEKEEPER_LLM_PROVIDERS", "openai,gemini,ollama"),
+        llm_provider=os.getenv("BEEKEEPER_LLM_PROVIDER", "ollama"),
+        llm_providers=os.getenv("BEEKEEPER_LLM_PROVIDERS", "ollama,gemini,openai"),
         ollama_base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
         ollama_model=os.getenv("BEEKEEPER_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
         ollama_timeout_seconds=int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")),
@@ -841,14 +841,14 @@ def _run_setup_wizard(non_interactive: bool = False) -> int:
         org_name = "Default Organization"
         hive_name = "Main Hive"
         honeycomb_root = ".honeycomb"
-        llm_provider = "openai,gemini,ollama"
+        llm_provider = "ollama,gemini,openai"
     else:
         print("Step 2: First-time tenant setup")
         org_name = input("Organization name [Default Organization]: ").strip() or "Default Organization"
         hive_name = input("Hive name [Main Hive]: ").strip() or "Main Hive"
         honeycomb_root = input("Honeycomb root path [.honeycomb]: ").strip() or ".honeycomb"
-        print("LLM provider: ollama (local), gemini, openai, or comma-separated for fallback (e.g. openai,gemini,ollama)")
-        llm_choice = input("LLM provider(s) [openai,gemini,ollama]: ").strip().lower() or "openai,gemini,ollama"
+        print("LLM provider: ollama (local), gemini, openai, or comma-separated for fallback (e.g. ollama,gemini,openai)")
+        llm_choice = input("LLM provider(s) [ollama,gemini,openai]: ").strip().lower() or "ollama,gemini,openai"
         llm_provider = llm_choice
         _update_env_key(project_root, "BEEKEEPER_LLM_PROVIDERS", llm_provider)
         if "gemini" in llm_provider or "openai" in llm_provider:
