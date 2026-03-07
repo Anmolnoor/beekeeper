@@ -167,7 +167,7 @@ class TemporalBeekeeperClient:
         vector_collection: str = "honeycomb_memory",
         vector_url: str = "http://localhost:6333",
         llm_provider: str = "ollama",
-        ollama_base_url: str = "http://100.99.106.59:11434",
+        ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b",
         ollama_timeout_seconds: int = 120,
         gemini_api_key: str = "",

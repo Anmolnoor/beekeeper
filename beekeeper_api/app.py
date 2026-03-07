@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
+from beekeeper.config import format_runtime_validation_errors, resolve_runtime_mode, validate_runtime_config
 from .routes import router
 from .setup import is_fresh_install
 
@@ -23,6 +24,16 @@ def _load_env() -> None:
 
 
 _load_env()
+
+
+def _enforce_runtime_config() -> None:
+    report = validate_runtime_config(resolve_runtime_mode())
+    if report.ok:
+        return
+    raise RuntimeError(format_runtime_validation_errors(report))
+
+
+_enforce_runtime_config()
 
 app = FastAPI(title="Beekeeper API", version="0.1.0")
 

@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+from beekeeper.config.settings import RuntimeMode
 from beekeeper.queen import QueenAgent, QueenConfig
 from beekeeper.vector_store import build_vector_store
 
@@ -75,6 +78,37 @@ def test_auto_scheduler_falls_back_inline_when_backends_unavailable(tmp_path: Pa
     selected, decision = queen._resolve_scheduler_backend({"query": "hello"})
     assert selected == "inline"
     assert decision["reason"] == "queue_unavailable_fallback_inline"
+
+
+def test_inline_scheduler_disallowed_in_non_dev_prefers_temporal(tmp_path: Path, monkeypatch) -> None:
+    queen = QueenAgent(
+        QueenConfig(
+            honeycomb_root=tmp_path / "honeycomb",
+            scheduler_backend="inline",
+            max_reruns=0,
+        )
+    )
+    monkeypatch.setattr("beekeeper.queen.resolve_runtime_mode", lambda: RuntimeMode.PROD)
+    monkeypatch.setattr(queen, "_can_connect_temporal", lambda: True)
+    monkeypatch.setattr(queen, "_can_connect_celery", lambda: False)
+    selected, decision = queen._resolve_scheduler_backend({"query": "hello"})
+    assert selected == "temporal"
+    assert decision["reason"] == "inline_disallowed_non_dev_temporal_selected"
+
+
+def test_inline_scheduler_disallowed_in_non_dev_without_backends_raises(tmp_path: Path, monkeypatch) -> None:
+    queen = QueenAgent(
+        QueenConfig(
+            honeycomb_root=tmp_path / "honeycomb",
+            scheduler_backend="inline",
+            max_reruns=0,
+        )
+    )
+    monkeypatch.setattr("beekeeper.queen.resolve_runtime_mode", lambda: RuntimeMode.PROD)
+    monkeypatch.setattr(queen, "_can_connect_temporal", lambda: False)
+    monkeypatch.setattr(queen, "_can_connect_celery", lambda: False)
+    with pytest.raises(RuntimeError, match="inline_scheduler_not_allowed_in_non_dev_without_queue_backend"):
+        queen._resolve_scheduler_backend({"query": "hello"})
 
 
 def test_qdrant_adapter_fallback_search() -> None:

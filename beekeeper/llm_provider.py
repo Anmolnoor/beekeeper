@@ -452,12 +452,12 @@ class LLMRouter:
         providers_str = os.getenv("BEEKEEPER_LLM_PROVIDERS", "").strip()
         if not providers_str:
             # Legacy: single provider
-            single = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "ollama").strip().lower()
+            single = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "openai,gemini,ollama").strip().lower()
             providers_str = single
 
         provider_names = [p.strip().lower() for p in providers_str.split(",") if p.strip()]
         if not provider_names:
-            provider_names = ["ollama"]
+            provider_names = ["openai", "gemini", "ollama"]
 
         providers: list[LLMProvider] = []
         for name in provider_names:
@@ -503,8 +503,8 @@ class LLMRouter:
 
 def build_llm_router(
     *,
-    llm_provider: str = "ollama",
-    llm_providers: str | None = None,
+    llm_provider: str = "openai",
+    llm_providers: str | None = "openai,gemini,ollama",
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "llama3.2",
     ollama_timeout_seconds: int = 120,
@@ -521,7 +521,7 @@ def build_llm_router(
         names = [p.strip().lower() for p in llm_providers.split(",") if p.strip()]
     else:
         # Prefer explicit runtime config over process env defaults.
-        single = (llm_provider or "ollama").strip().lower()
+        single = (llm_provider or "openai").strip().lower()
         names = [single]
 
     providers: list[LLMProvider] = []

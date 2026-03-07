@@ -114,6 +114,11 @@ class ArtifactRef(BaseModel):
     task_id: str
     kind: Literal["report", "json", "text", "log", "binary", "other"] = "other"
     location: str
+    storage_backend: str = "local"
+    storage_bucket: str | None = None
+    object_key: str | None = None
+    content_type: str = "text/plain"
+    tenant_scope: str | None = None
     checksum: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -189,6 +194,9 @@ class PolicyDecision(BaseModel):
     status: Literal["approve", "block", "needs_human"]
     reason: str
     guardrail_flags: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+    obligations: list[str] = Field(default_factory=list)
+    policy_version: str = SCHEMA_VERSION
     requires_human_approval: bool = False
     approved_by: str | None = None
     approved_at: datetime | None = None

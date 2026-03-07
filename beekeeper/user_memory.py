@@ -12,8 +12,9 @@ from .worker import WebSearchWorker
 
 def _make_extractor_llm() -> Callable[[str], str | None]:
     """Build a callable that uses the configured LLM for extraction."""
-    provider = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "ollama").strip().lower()
-    base_url = (os.getenv("BEEKEEPER_OLLAMA_BASE_URL") or "http://100.99.106.59:11434").rstrip("/")
+    provider = (os.getenv("BEEKEEPER_LLM_PROVIDER") or "openai").strip().lower()
+    providers = (os.getenv("BEEKEEPER_LLM_PROVIDERS") or "openai,gemini,ollama").strip()
+    base_url = (os.getenv("BEEKEEPER_OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
     model = os.getenv("BEEKEEPER_OLLAMA_MODEL") or "catsarethebest/qwen2.5-N2:1.5b"
     timeout = max(5, int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")))
     gemini_key = (os.getenv("BEEKEEPER_GEMINI_API_KEY") or "").strip()
@@ -22,6 +23,7 @@ def _make_extractor_llm() -> Callable[[str], str | None]:
 
     worker = WebSearchWorker(
         llm_provider=provider,
+        llm_providers=providers,
         ollama_base_url=base_url,
         ollama_model=model,
         ollama_timeout_seconds=timeout,
@@ -299,4 +301,3 @@ def load_markdown_memory_snippets(honeycomb_root: str | Path, query: str, limit:
         if len(out) >= limit:
             break
     return out
-

@@ -18,6 +18,7 @@ from .contracts import (
     ToolResult,
     ToolSpec,
 )
+from .governance.tool_broker import LocalToolBroker, ToolBrokerContext
 from .honeycomb import HoneycombStore
 
 
@@ -91,11 +92,13 @@ class ToolExecutor:
         honeycomb: HoneycombStore | None = None,
         policy: ToolExecutionPolicy | None = None,
         tool_guardrail_fn: ToolGuardrailFn | None = None,
+        tool_broker: LocalToolBroker | None = None,
     ) -> None:
         self.registry = registry
         self.honeycomb = honeycomb
         self.policy = policy or ToolExecutionPolicy()
         self.tool_guardrail_fn = tool_guardrail_fn
+        self.tool_broker = tool_broker
 
     def execute(
         self,
@@ -198,7 +201,18 @@ class ToolExecutor:
         ctx["call_id"] = call.call_id
         ctx["trace_id"] = trace_id or call.trace_id
         try:
-            result = executor_fn(call.tool_name, call.arguments, ctx)
+            if self.tool_broker is not None:
+                result = self.tool_broker.execute(
+                    executor=executor_fn,
+                    broker_context=ToolBrokerContext(
+                        trace_id=trace_id or call.trace_id,
+                        call=call,
+                        tool_spec=spec,
+                        context=ctx,
+                    ),
+                )
+            else:
+                result = executor_fn(call.tool_name, call.arguments, ctx)
         except Exception as exc:
             result = ToolResult(
                 call_id=call.call_id,

@@ -26,14 +26,23 @@ from beekeeper.ops import compute_ops_metrics
 from beekeeper.queen import QueenAgent, QueenConfig
 from beekeeper.queen_updates import list_queen_updates
 from beekeeper.runtime_env import resolve_runtime_context
+from beekeeper.submission_service import RunAdmissionService
+from beekeeper.config.settings import RuntimeMode, resolve_runtime_mode
 from beekeeper.store import BeekeeperStore
 from beekeeper.tenancy import UserRecord
+from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
+from beekeeper.replay_store import ReplayStore
+from beekeeper.tenancy_context import TenancyContext, resolve_tenancy_context
+from beekeeper.quotas import TenantQuotaManager
+from beekeeper.rate_limits import TenantRateLimiter
+from beekeeper.channel_capabilities import CHANNEL_CAPABILITY_MATRIX
 
 from .auth import create_access_token, get_current_user, hash_password, verify_password
 from .deps import get_honeycomb, get_store, get_worker_registry
 from .setup import is_fresh_install, is_setup_done, mark_setup_done, read_env_from_file, write_env_from_config
 
 router = APIRouter()
+_admission_service = RunAdmissionService()
 
 
 def _get_whatsapp_config() -> dict[str, Any] | None:
@@ -102,6 +111,97 @@ def _extract_reply_from_results(results: Any, *, empty_fallback: str = "No respo
 def _short_error(exc: Exception) -> str:
     text = str(exc).strip() or exc.__class__.__name__
     return text[:240]
+
+
+def _is_fresh_unix_timestamp(raw: str | None, *, max_skew_seconds: int = 300) -> bool:
+    if not raw:
+        return False
+    try:
+        ts = int(str(raw).strip())
+    except ValueError:
+        return False
+    now = int(datetime.now(timezone.utc).timestamp())
+    return abs(now - ts) <= max(1, max_skew_seconds)
+
+
+def _claim_webhook_replay_key(config: dict[str, Any], *, channel: str, replay_key: str, ttl_seconds: int = 86_400) -> bool:
+    if not replay_key.strip():
+        return True
+    root = Path(str(config.get("honeycomb_root", ".honeycomb")))
+    hb = HoneycombStore(HoneycombConfig(root_dir=root))
+    if hb.durable_state is None:
+        return True
+    replay = ReplayStore(hb.durable_state, default_ttl_seconds=ttl_seconds)
+    return replay.claim(channel=channel, replay_key=replay_key, ttl_seconds=ttl_seconds)
+
+
+def _resolve_tenant(store: BeekeeperStore, honeycomb_root: str) -> TenancyContext:
+    return resolve_tenancy_context(store, honeycomb_root)
+
+
+def _enforce_runtime_support_path(*, scheduler: str | None = None, channel: str | None = None) -> None:
+    mode = resolve_runtime_mode()
+    if mode != RuntimeMode.PROD:
+        return
+    if scheduler is not None and scheduler.strip().lower() != "temporal":
+        raise HTTPException(status_code=400, detail="prod_requires_temporal_scheduler")
+    if channel is not None and channel.strip().lower() != "slack":
+        raise HTTPException(status_code=400, detail="experimental_channel_not_supported_in_prod")
+
+
+def _should_use_async_submission(scheduler: str | None) -> bool:
+    return (scheduler or "").strip().lower() == "temporal"
+
+
+def _enforce_tenant_rate_limit(
+    *,
+    store: BeekeeperStore,
+    tenant: TenancyContext,
+    key: str,
+    default_limit: int,
+    window_seconds: int = 60,
+) -> None:
+    limiter = TenantRateLimiter(store)
+    ok, used, limit = limiter.check_and_record(
+        org_id=tenant.org_id,
+        key=key,
+        default_limit=default_limit,
+        window_seconds=window_seconds,
+    )
+    if ok:
+        return
+    raise HTTPException(
+        status_code=429,
+        detail={
+            "error": "tenant_rate_limit_exceeded",
+            "tenant_org_id": tenant.org_scope,
+            "limit_key": key,
+            "limit": limit,
+            "used": used,
+        },
+    )
+
+
+def _start_tenant_run_or_raise(*, store: BeekeeperStore, tenant: TenancyContext) -> TenantQuotaManager:
+    quotas = TenantQuotaManager(store)
+    ok, reason = quotas.check_and_start_run(tenant.org_id)
+    if ok:
+        return quotas
+    raise HTTPException(
+        status_code=429,
+        detail={"error": reason, "tenant_org_id": tenant.org_scope},
+    )
+
+
+def _record_tenant_channel_send_or_raise(*, store: BeekeeperStore, tenant: TenancyContext) -> None:
+    quotas = TenantQuotaManager(store)
+    ok, reason = quotas.record_channel_send(tenant.org_id)
+    if ok:
+        return
+    raise HTTPException(
+        status_code=429,
+        detail={"error": reason, "tenant_org_id": tenant.org_scope},
+    )
 
 
 def _activity_window(window: str) -> tuple[datetime, datetime, int, int]:
@@ -203,7 +303,7 @@ class OnboardingRequest(BaseModel):
 
 class SetupCompleteRequest(BaseModel):
     """First-run wizard completion payload."""
-    llm_provider: str = "ollama"
+    llm_provider: str = "openai"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "catsarethebest/qwen2.5-N2:1.5b"
     gemini_api_key: str = ""
@@ -435,7 +535,7 @@ def _effective_settings(honeycomb_root: str = ".honeycomb") -> dict[str, Any]:
     settings_list = store.list_settings()
     settings_map = {row.get("key"): row.get("value") for row in settings_list if row.get("key")}
     effective_fields = {
-        "llm_provider": {"value": env_cfg.get("llm_provider", "ollama"), "source": "env"},
+        "llm_provider": {"value": env_cfg.get("llm_provider", "openai"), "source": "env"},
         "ollama_base_url": {"value": env_cfg.get("ollama_base_url", "http://localhost:11434"), "source": "env"},
         "ollama_model": {"value": env_cfg.get("ollama_model", ""), "source": "env"},
         "gemini_api_key": {"value": env_cfg.get("gemini_api_key", ""), "source": "env"},
@@ -579,7 +679,7 @@ def _get_setup_config(mask_secrets: bool = False) -> dict[str, Any]:
         return "***" if (mask_secrets and val) else (val or "")
 
     return {
-        "llm_provider": env.get("BEEKEEPER_LLM_PROVIDER") or os.environ.get("BEEKEEPER_LLM_PROVIDER", "ollama"),
+        "llm_provider": env.get("BEEKEEPER_LLM_PROVIDER") or os.environ.get("BEEKEEPER_LLM_PROVIDER", "openai"),
         "ollama_base_url": env.get("BEEKEEPER_OLLAMA_BASE_URL") or os.environ.get("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
         "ollama_model": env.get("BEEKEEPER_OLLAMA_MODEL") or os.environ.get("BEEKEEPER_OLLAMA_MODEL", "catsarethebest/qwen2.5-N2:1.5b"),
         "gemini_api_key": _mask(env.get("BEEKEEPER_GEMINI_API_KEY") or os.environ.get("BEEKEEPER_GEMINI_API_KEY", "")),
@@ -1102,20 +1202,41 @@ async def channel_webhook(channel: str, request: Request):
 
     body = await request.body()
     store = get_store()
+    _enforce_runtime_support_path(channel=channel)
     if channel == "whatsapp":
         config = _get_whatsapp_config()
     else:
         config = store.get_channel_config_decrypted(channel)
     if not config:
         raise HTTPException(status_code=404, detail="channel_not_configured")
+    tenant = _resolve_tenant(store, str(config.get("honeycomb_root", ".honeycomb")))
+    _enforce_tenant_rate_limit(
+        store=store,
+        tenant=tenant,
+        key="channel_ingress_per_minute",
+        default_limit=120,
+    )
+    quotas = TenantQuotaManager(store)
+    ingest_ok, ingest_reason = quotas.record_webhook_ingest(tenant.org_id)
+    if not ingest_ok:
+        raise HTTPException(
+            status_code=429,
+            detail={"error": ingest_reason, "tenant_org_id": tenant.org_scope},
+        )
 
     if channel == "slack":
         signing_secret = config.get("slack_signing_secret")
         sig = request.headers.get("x-slack-signature", "")
         if signing_secret and not verify_slack_signature(body, sig, signing_secret):
             raise HTTPException(status_code=401, detail="invalid_slack_signature")
+        ts = request.headers.get("x-slack-request-timestamp", "")
+        if signing_secret and not _is_fresh_unix_timestamp(ts):
+            raise HTTPException(status_code=401, detail="stale_slack_request")
         import json as _json
         payload = _json.loads(body)
+        event_id = str(payload.get("event_id", "")).strip()
+        if event_id and not _claim_webhook_replay_key(config, channel="slack", replay_key=f"slack:{event_id}"):
+            return JSONResponse(content={"ok": True, "duplicate": True})
         if payload.get("type") == "url_verification":
             return JSONResponse(content={"challenge": payload.get("challenge", "")})
         if payload.get("type") == "event_callback":
@@ -1144,6 +1265,7 @@ async def channel_webhook(channel: str, request: Request):
                         else:
                             reply_msg = "Invalid or expired code. Get a new code from the dashboard."
                         if config.get("slack_bot_token"):
+                            _record_tenant_channel_send_or_raise(store=store, tenant=tenant)
                             try:
                                 from slack_sdk import WebClient
                                 WebClient(token=config["slack_bot_token"]).chat_postMessage(channel=channel_id, text=reply_msg)
@@ -1154,6 +1276,7 @@ async def channel_webhook(channel: str, request: Request):
                         base = __import__("os").environ.get("BEEKEEPER_BASE_URL", "http://localhost:8788")
                         reply_msg = f"DM pairing required. Get a code from the dashboard ({base}/) and send it here."
                         if config.get("slack_bot_token"):
+                            _record_tenant_channel_send_or_raise(store=store, tenant=tenant)
                             try:
                                 from slack_sdk import WebClient
                                 WebClient(token=config["slack_bot_token"]).chat_postMessage(channel=channel_id, text=reply_msg)
@@ -1179,6 +1302,7 @@ async def channel_webhook(channel: str, request: Request):
                     resp = result.get("response", {})
                     results = resp.get("results", [])
                     reply = _extract_reply_from_results(results, empty_fallback="Request processed.")
+                    _record_tenant_channel_send_or_raise(store=store, tenant=tenant)
                     try:
                         from slack_sdk import WebClient
                         client = WebClient(token=bot_token)
@@ -1197,6 +1321,9 @@ async def channel_webhook(channel: str, request: Request):
                 raise HTTPException(status_code=401, detail="invalid_telegram_secret")
         import json as _json
         payload = _json.loads(body)
+        update_id = str(payload.get("update_id", "")).strip()
+        if update_id and not _claim_webhook_replay_key(config or {}, channel="telegram", replay_key=f"telegram:{update_id}"):
+            return JSONResponse(content={"ok": True, "duplicate": True})
         if "message" in payload:
             msg = payload["message"]
             text = msg.get("text", "")
@@ -1224,6 +1351,7 @@ async def channel_webhook(channel: str, request: Request):
                         reply_msg = "Invalid or expired code. Get a new code from the dashboard."
                     bot_token = (config or {}).get("telegram_bot_token")
                     if bot_token:
+                        _record_tenant_channel_send_or_raise(store=store, tenant=tenant)
                         try:
                             import urllib.request
                             import urllib.parse
@@ -1238,6 +1366,7 @@ async def channel_webhook(channel: str, request: Request):
                     reply_msg = f"DM pairing required. Get a code from the dashboard ({base}/) and send it here."
                     bot_token = (config or {}).get("telegram_bot_token")
                     if bot_token:
+                        _record_tenant_channel_send_or_raise(store=store, tenant=tenant)
                         try:
                             import urllib.request
                             import urllib.parse
@@ -1262,6 +1391,7 @@ async def channel_webhook(channel: str, request: Request):
                     resp = result.get("response", {})
                     results = resp.get("results", [])
                     reply = _extract_reply_from_results(results, empty_fallback="Request processed.")
+                    _record_tenant_channel_send_or_raise(store=store, tenant=tenant)
                     try:
                         import urllib.request
                         import urllib.parse
@@ -1280,8 +1410,13 @@ async def channel_webhook(channel: str, request: Request):
         timestamp = request.headers.get("x-signature-timestamp", "")
         if public_key and (not verify_discord_signature(body, sig, timestamp, public_key)):
             raise HTTPException(status_code=401, detail="invalid_discord_signature")
+        if public_key and not _is_fresh_unix_timestamp(timestamp):
+            raise HTTPException(status_code=401, detail="stale_discord_request")
         import json as _json
         payload = _json.loads(body)
+        interaction_id = str(payload.get("id", "")).strip()
+        if interaction_id and not _claim_webhook_replay_key(config, channel="discord", replay_key=f"discord:{interaction_id}"):
+            return JSONResponse(content={"type": 1})
         itype = payload.get("type")
         if itype == 1:
             return JSONResponse(content={"type": 1})
@@ -1349,6 +1484,9 @@ async def channel_webhook(channel: str, request: Request):
                 chat_id = whatsapp_chat["chat_id"]
                 openai_key = config.get("openai_api_key") or __import__("os").environ.get("BEEKEEPER_OPENAI_API_KEY", "")
                 for msg in messages:
+                    msg_id = str(msg.get("id", "")).strip()
+                    if msg_id and not _claim_webhook_replay_key(config, channel="whatsapp", replay_key=f"whatsapp:{msg_id}"):
+                        continue
                     msg_type = msg.get("type", "text")
                     text = ""
                     if msg_type == "text":
@@ -1368,7 +1506,6 @@ async def channel_webhook(channel: str, request: Request):
                     if not text:
                         continue
                     sender = msg.get("from", "unknown")
-                    msg_id = msg.get("id", "")
                     store.append_chat_message(chat_id, "user", text, source="whatsapp")
                     result = hub.dispatch(
                         "whatsapp",
@@ -1381,6 +1518,7 @@ async def channel_webhook(channel: str, request: Request):
                     reply = _extract_reply_from_results(results, empty_fallback="Request processed.")
                     store.append_chat_message(chat_id, "assistant", reply)
                     if access_token and phone_number_id:
+                        _record_tenant_channel_send_or_raise(store=store, tenant=tenant)
                         try:
                             import urllib.request
                             import urllib.parse
@@ -1472,6 +1610,7 @@ def slack_oauth_callback(
 
 @router.post("/api/chat/run")
 def run_chat(body: RunChatRequest, user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    _enforce_runtime_support_path(scheduler=body.scheduler)
     log_service_call(
         "beekeeper_api",
         "called",
@@ -1479,9 +1618,29 @@ def run_chat(body: RunChatRequest, user: Annotated[UserRecord, Depends(get_curre
         user_id=user.user_id,
         resource="chat:run",
     )
+    store = get_store()
+    tenant = _resolve_tenant(store, body.honeycomb_root)
+    if tenant.org_id:
+        from .auth import require_org_access
+
+        require_org_access(user, tenant.org_id, store, "viewer")
+    _enforce_tenant_rate_limit(
+        store=store,
+        tenant=tenant,
+        key="api_submission_per_minute",
+        default_limit=60,
+    )
+    quotas = _start_tenant_run_or_raise(store=store, tenant=tenant)
     queen = _queen_from_request(body)
     try:
-        result = queen.run(intent=body.intent, payload=body.payload, source="beekeeper_api:chat_run")
+        receipt = _admission_service.submit(
+            queen=queen,
+            intent=body.intent,
+            payload=body.payload,
+            source="beekeeper_api:chat_run",
+            async_execution=_should_use_async_submission(body.scheduler),
+            on_complete=lambda ok: quotas.complete_run(tenant.org_id, success=ok),
+        )
     except Exception as exc:
         log_service_call(
             "queen",
@@ -1498,9 +1657,11 @@ def run_chat(body: RunChatRequest, user: Annotated[UserRecord, Depends(get_curre
         source="beekeeper_api:chat_run",
         user_id=user.user_id,
         resource="chat:run",
-        trace_id=result.get("trace_id"),
+        trace_id=receipt.trace_id,
     )
-    return result
+    if receipt.async_execution:
+        return receipt.to_dict()
+    return receipt.result or receipt.to_dict()
 
 
 # --- ChatGPT-style persistent chats ---
@@ -1548,6 +1709,7 @@ def send_chat_message(
     body: SendMessageRequest,
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
+    _enforce_runtime_support_path(scheduler=body.scheduler)
     store = get_store()
     chat = store.get_chat(chat_id)
     if not chat:
@@ -1561,6 +1723,18 @@ def send_chat_message(
     store.append_chat_message(chat_id, "user", content)
     memories = [{"content": m["content"]} for m in store.search_user_memories(user.user_id, query=content, limit=18)]
     payload = {"query": content, "messages": prior, "user_memories": memories, "delegate_to_worker": True, "use_web_search": True, "user_id": user.user_id}
+    tenant = _resolve_tenant(store, body.honeycomb_root)
+    if tenant.org_id:
+        from .auth import require_org_access
+
+        require_org_access(user, tenant.org_id, store, "viewer")
+    _enforce_tenant_rate_limit(
+        store=store,
+        tenant=tenant,
+        key="api_submission_per_minute",
+        default_limit=60,
+    )
+    quotas = _start_tenant_run_or_raise(store=store, tenant=tenant)
     log_service_call(
         "beekeeper_api",
         "called",
@@ -1571,16 +1745,36 @@ def send_chat_message(
     _mode = getattr(body, "execution_mode", "legacy_worker") or "legacy_worker"
     if _mode not in ("legacy_worker", "model_tools", "hybrid"):
         _mode = "legacy_worker"
-    queen = QueenAgent(
-        QueenConfig(
-            honeycomb_root=Path(body.honeycomb_root),
-            scheduler_backend=body.scheduler,
-            vector_backend=body.vector,
-            execution_mode=_mode,
-        )
-    )
     try:
-        result = queen.run(intent=body.intent, payload=payload, source="web_ui")
+        queen = QueenAgent(
+            QueenConfig(
+                honeycomb_root=Path(body.honeycomb_root),
+                scheduler_backend=body.scheduler,
+                vector_backend=body.vector,
+                execution_mode=_mode,
+            )
+        )
+        def _on_success(result: dict[str, Any]) -> None:
+            results = result.get("results", [])
+            reply = _extract_reply_from_results(results, empty_fallback="No response.")
+            store.append_chat_message(chat_id, "assistant", reply)
+            _enqueue_context_curation(
+                body=body,
+                user_id=user.user_id,
+                chat_id=chat_id,
+                user_msg=content,
+                assistant_reply=reply,
+            )
+
+        receipt = _admission_service.submit(
+            queen=queen,
+            intent=body.intent,
+            payload=payload,
+            source="web_ui",
+            async_execution=_should_use_async_submission(body.scheduler),
+            on_complete=lambda ok: quotas.complete_run(tenant.org_id, success=ok),
+            on_success=_on_success,
+        )
     except Exception as exc:
         log_service_call(
             "queen",
@@ -1597,18 +1791,14 @@ def send_chat_message(
         source="web_ui",
         user_id=user.user_id,
         resource="chat:message",
-        trace_id=result.get("trace_id"),
+        trace_id=receipt.trace_id,
     )
+    updated = store.get_chat(chat_id)
+    if receipt.async_execution:
+        return {"chat": updated, "reply": "", "result": receipt.to_dict(), "pending": True}
+    result = receipt.result or {}
     results = result.get("results", [])
     reply = _extract_reply_from_results(results, empty_fallback="No response.")
-    store.append_chat_message(chat_id, "assistant", reply)
-    _enqueue_context_curation(
-        body=body,
-        user_id=user.user_id,
-        chat_id=chat_id,
-        user_msg=content,
-        assistant_reply=reply,
-    )
     updated = store.get_chat(chat_id)
     return {"chat": updated, "reply": reply, "result": result}
 
@@ -1620,6 +1810,7 @@ async def send_chat_message_stream(
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ):
     """Stream real-time Queen execution status, then return final result."""
+    _enforce_runtime_support_path(scheduler=body.scheduler)
     store = get_store()
     chat = store.get_chat(chat_id)
     if not chat:
@@ -1633,6 +1824,18 @@ async def send_chat_message_stream(
     store.append_chat_message(chat_id, "user", content)
     memories = [{"content": m["content"]} for m in store.search_user_memories(user.user_id, query=content, limit=18)]
     payload = {"query": content, "messages": prior, "user_memories": memories, "user_id": user.user_id}
+    tenant = _resolve_tenant(store, body.honeycomb_root)
+    if tenant.org_id:
+        from .auth import require_org_access
+
+        require_org_access(user, tenant.org_id, store, "viewer")
+    _enforce_tenant_rate_limit(
+        store=store,
+        tenant=tenant,
+        key="api_submission_per_minute",
+        default_limit=60,
+    )
+    quotas = _start_tenant_run_or_raise(store=store, tenant=tenant)
 
     status_queue: queue.Queue[str | None] = queue.Queue()
     result_holder: list[dict[str, Any]] = []
@@ -1662,6 +1865,7 @@ async def send_chat_message_stream(
                 status_queue.put(msg)
 
             result = queen.run(intent=body.intent, payload=payload, status_callback=on_status, source="web_ui")
+            quotas.complete_run(tenant.org_id, success=True)
             log_service_call(
                 "queen",
                 "completed",
@@ -1683,6 +1887,7 @@ async def send_chat_message_stream(
             updated = store.get_chat(chat_id)
             result_holder.append({"chat": updated, "reply": reply})
         except Exception as exc:
+            quotas.complete_run(tenant.org_id, success=False)
             log_service_call(
                 "queen",
                 "failed",
@@ -1749,6 +1954,7 @@ def delete_chat(
 
 @router.post("/api/chat/channel")
 def run_channel_chat(body: ChannelRunRequest, user: Annotated[UserRecord, Depends(get_current_user)]) -> dict[str, Any]:
+    _enforce_runtime_support_path(channel=body.channel)
     log_service_call(
         "beekeeper_api",
         "called",
@@ -1756,9 +1962,27 @@ def run_channel_chat(body: ChannelRunRequest, user: Annotated[UserRecord, Depend
         user_id=user.user_id,
         resource=f"channel:{body.channel}",
     )
+    store = get_store()
+    tenant = _resolve_tenant(store, body.honeycomb_root)
+    if tenant.org_id:
+        from .auth import require_org_access
+
+        require_org_access(user, tenant.org_id, store, "viewer")
+    _enforce_tenant_rate_limit(
+        store=store,
+        tenant=tenant,
+        key="api_submission_per_minute",
+        default_limit=60,
+    )
+    quotas = _start_tenant_run_or_raise(store=store, tenant=tenant)
     queen = QueenAgent(QueenConfig(honeycomb_root=Path(body.honeycomb_root)))
     hub = ChatHub(queen)
-    result = hub.dispatch(body.channel, body.payload, intent=body.intent, source=f"channel:{body.channel}")
+    success = False
+    try:
+        result = hub.dispatch(body.channel, body.payload, intent=body.intent, source=f"channel:{body.channel}")
+        success = True
+    finally:
+        quotas.complete_run(tenant.org_id, success=success)
     trace_id = result.get("response", {}).get("trace_id") if isinstance(result.get("response"), dict) else None
     log_service_call(
         "queen",
@@ -1807,6 +2031,55 @@ def get_trace(
     events = honeycomb.read_events(trace_id)
     edges = honeycomb.read_graph(trace_id)
     return {"trace_id": trace_id, "events": events, "edges": edges}
+
+
+@router.get("/api/runs/{trace_id}/inspection")
+def get_run_inspection(
+    trace_id: str,
+    honeycomb_root: str = ".honeycomb",
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    log_service_call(
+        "beekeeper_api",
+        "called",
+        source="beekeeper_api:run_inspection",
+        user_id=user.user_id if user else None,
+        resource=f"run_inspection:{trace_id}",
+        trace_id=trace_id,
+    )
+    honeycomb = get_honeycomb(honeycomb_root)
+    if honeycomb.durable_state is None:
+        raise HTTPException(status_code=503, detail="durable_state_disabled")
+
+    inspection = honeycomb.durable_state.get_run_inspection(trace_id)
+    if inspection is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+
+    events = honeycomb.read_events(trace_id)
+    artifact_events = [event for event in events if event.get("kind") == "artifact"]
+    retries = [
+        event
+        for event in events
+        if event.get("kind") in {"monitor_rerun", "task_retry", "rerun"} or str(event.get("stage", "")).lower() == "retry"
+    ]
+    if not inspection.get("artifacts"):
+        inspection["artifacts"] = [
+            {
+                "task_id": str(event.get("task_id", "")),
+                "artifact_id": str(event.get("artifact_id", "")),
+                "location": str(event.get("location", "")),
+                "storage_backend": str(event.get("storage_backend", "")),
+                "storage_bucket": str(event.get("storage_bucket", "")) or None,
+                "object_key": str(event.get("object_key", "")) or None,
+                "content_type": str(event.get("content_type", "")) or None,
+                "tenant_scope": str(event.get("tenant_scope", "")) or None,
+                "at": str(event.get("at", "")),
+            }
+            for event in artifact_events
+        ]
+    inspection["retry_history"] = retries
+    inspection["last_heartbeat_at"] = str(events[-1].get("at", "")) if events else None
+    return inspection
 
 
 @router.get("/api/traces/{trace_id}/tree")
@@ -1876,8 +2149,16 @@ def get_analytics_latency(
 @router.get("/api/ops/overview")
 def get_ops_overview(
     honeycomb_root: str = ".honeycomb",
+    org_id: str | None = None,
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
+    store = get_store()
+    tenant = _resolve_tenant(store, honeycomb_root)
+    scoped_org_id = org_id or tenant.org_id
+    if scoped_org_id:
+        from .auth import require_org_access
+
+        require_org_access(user, scoped_org_id, store, "viewer")
     honeycomb = get_honeycomb(honeycomb_root)
     metrics = compute_ops_metrics(honeycomb.root_dir)
     pending = honeycomb.list_pending_reviews()
@@ -1913,8 +2194,57 @@ def get_ops_overview(
             key=lambda pair: float(pair[1]),
             reverse=True,
         )[:1],
+        "tenant": {
+            "org_id": scoped_org_id,
+            "hive_id": tenant.hive_id,
+        },
+        "quota": TenantQuotaManager(store).snapshot(scoped_org_id),
+        "rate_limits": TenantRateLimiter(store).snapshot(scoped_org_id),
         "alerts": alerts,
         "recent_logs": logs,
+    }
+
+
+@router.get("/api/tenancy/controls")
+def get_tenancy_controls(
+    honeycomb_root: str = ".honeycomb",
+    org_id: str | None = None,
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    store = get_store()
+    tenant = _resolve_tenant(store, honeycomb_root)
+    scoped_org_id = org_id or tenant.org_id
+    if scoped_org_id:
+        from .auth import require_org_access
+
+        require_org_access(user, scoped_org_id, store, "viewer")
+    return {
+        "tenant": {
+            "org_id": scoped_org_id,
+            "hive_id": tenant.hive_id,
+            "honeycomb_root": honeycomb_root,
+        },
+        "quota": TenantQuotaManager(store).snapshot(scoped_org_id),
+        "rate_limits": TenantRateLimiter(store).snapshot(scoped_org_id),
+    }
+
+
+@router.get("/api/support/matrix")
+def get_support_matrix(
+    user: Annotated[UserRecord, Depends(get_current_user)] = None,
+) -> dict[str, Any]:
+    mode = resolve_runtime_mode().value
+    return {
+        "runtime_mode": mode,
+        "scheduler": {
+            "supported": ["temporal"],
+            "experimental": ["inline", "celery", "auto"],
+        },
+        "channels": CHANNEL_CAPABILITY_MATRIX,
+        "llm_provider": {
+            "primary": "ollama",
+            "experimental": ["gemini", "openai"],
+        },
     }
 
 
@@ -2057,6 +2387,7 @@ def log_roadmap_usability(
 def get_activity_series(
     window: str = Query("1h", pattern="^(1h|24h)$"),
     honeycomb_root: str = ".honeycomb",
+    org_id: str | None = None,
     user: Annotated[UserRecord, Depends(get_current_user)] = None,
 ) -> dict[str, Any]:
     now, start, step_seconds, bucket_count = _activity_window(window)
@@ -2066,6 +2397,12 @@ def get_activity_series(
     hive_series = [0 for _ in range(bucket_count)]
 
     store = get_store()
+    tenant = _resolve_tenant(store, honeycomb_root)
+    scoped_org_id = org_id or tenant.org_id
+    if scoped_org_id:
+        from .auth import require_org_access
+
+        require_org_access(user, scoped_org_id, store, "viewer")
     honeycomb = get_honeycomb(honeycomb_root)
 
     active_chat_ids: set[str] = set()
@@ -2194,6 +2531,7 @@ def get_activity_series(
             "events_in_window": sum(hive_series),
             "series": [{"ts": bucket_starts[i].isoformat(), "work": hive_series[i]} for i in range(bucket_count)],
         },
+        "tenant": {"org_id": scoped_org_id, "hive_id": tenant.hive_id},
     }
 
 

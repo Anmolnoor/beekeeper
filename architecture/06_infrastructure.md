@@ -81,20 +81,20 @@ QueenAgent → TemporalBeekeeperClient → Temporal Server → Temporal Worker �
 Providers are tried in order. First success wins.
 
 ```
-BEEKEEPER_LLM_PROVIDERS=gemini,ollama  →  (compose default) tries Gemini first, then Ollama fallback
-BEEKEEPER_LLM_PROVIDERS=ollama,gemini  →  Ollama first, Gemini fallback
-BEEKEEPER_LLM_PROVIDER=ollama          →  single provider (legacy)
+BEEKEEPER_LLM_PROVIDERS=openai,gemini,ollama  →  (compose default) tries OpenAI first, then Gemini, then Ollama fallback
+BEEKEEPER_LLM_PROVIDERS=ollama,gemini,openai  →  Ollama first, then Gemini, then OpenAI fallback
+BEEKEEPER_LLM_PROVIDER=openai                 →  single provider (legacy)
 ```
 
 Runtime precedence:
 - `BEEKEEPER_LLM_PROVIDERS` (ordered chain) takes precedence over `BEEKEEPER_LLM_PROVIDER`.
-- Explicit process env (for example `BEEKEEPER_LLM_PROVIDER=ollama beekeeper run ...`) is not overridden by values in `.env`.
+- Explicit process env (for example `BEEKEEPER_LLM_PROVIDER=openai beekeeper run ...`) is not overridden by values in `.env`.
 - If only `BEEKEEPER_LLM_PROVIDER` is set in runtime config, router order is exactly that provider.
 
 ### Ollama (local)
 
 ```bash
-BEEKEEPER_OLLAMA_BASE_URL=http://100.99.106.59:11434
+BEEKEEPER_OLLAMA_BASE_URL=http://localhost:11434
 BEEKEEPER_OLLAMA_MODEL=catsarethebest/qwen2.5-N2:1.5b
 BEEKEEPER_OLLAMA_TIMEOUT_SECONDS=120
 ```

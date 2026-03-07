@@ -33,6 +33,7 @@ from .contracts import (
     Status,
     WorkerKind,
 )
+from .idempotency import stable_idempotency_key
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +142,9 @@ def _action_web_search(req: QueenActionRequest, ctx: ActionContext) -> QueenActi
     ctx.emit(f"Running web search: {query[:80]}…")
     try:
         from uuid import uuid4
+        trace_id = req.trace_id or f"action_{uuid4().hex}"
         task = TaskEnvelope(
-            queen_trace_id=req.trace_id or f"action_{uuid4().hex}",
+            queen_trace_id=trace_id,
             queen_request_id=str(uuid4()),
             task_type="research_topic",
             worker_kind=WorkerKind.web_search,
@@ -151,7 +153,10 @@ def _action_web_search(req: QueenActionRequest, ctx: ActionContext) -> QueenActi
                 "use_web_search": bool(req.parameters.get("use_web_search", True)),
                 "domains": list(req.parameters.get("domains") or []),
             },
-            idempotency_key=str(uuid4()),
+            idempotency_key=stable_idempotency_key(
+                "action_web_search",
+                {"trace_id": trace_id, "query": query, "domains": list(req.parameters.get("domains") or [])},
+            ),
             status=Status.queued,
         )
         # Build a lightweight worker context
@@ -298,7 +303,15 @@ def _action_run_task(req: QueenActionRequest, ctx: ActionContext) -> QueenAction
             task_type=intent,
             worker_kind=worker_kind,
             payload=payload,
-            idempotency_key=str(uuid4()),
+            idempotency_key=stable_idempotency_key(
+                "action_run_task",
+                {
+                    "trace_id": req.trace_id or "",
+                    "intent": intent,
+                    "worker_kind": worker_kind_str,
+                    "payload": payload,
+                },
+            ),
             status=Status.queued,
         )
         # Determine blueprint
