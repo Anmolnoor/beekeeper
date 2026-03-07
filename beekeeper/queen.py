@@ -64,6 +64,11 @@ from .skill_loader import load_skills_from_md
 from .autonomy import AutonomyPolicy, DEFAULT_AUTONOMY_POLICY
 from .profile_service import ProfileService
 from .response_aggregation_service import ResponseAggregationService
+from .planner_service import PlannerService
+from .policy_service import PolicyService
+from .dispatch_service import DispatchConfig, DispatchService
+from .execution_mode_service import ExecutionModeService
+from .worker_forge_service import WorkerForgeService
 from .user_policy import UserPolicy
 from .queen_updates import write_queen_update
 from .queen_actions import ActionContext, QueenActionLoop, build_default_action_registry
@@ -218,6 +223,60 @@ class QueenAgent:
         self._plugin_reload_lock = threading.Lock()
         self.profile_service = ProfileService()
         self.response_aggregation_service = ResponseAggregationService()
+        self.planner_service = PlannerService(
+            worker_registry=self.worker_registry,
+            worker_runtime=self.worker_runtime,
+            skill_creation_phrases=self._SKILL_CREATION_PHRASES,
+        )
+        self.execution_mode_service = ExecutionModeService(
+            execution_mode=self.config.execution_mode,
+            infer_file_action=self._infer_file_action,
+            extract_save_to_file_request=self._extract_save_to_file_request,
+            looks_like_shell_task=_looks_like_shell_task,
+        )
+        self.dispatch_service = DispatchService(
+            config=DispatchConfig(
+                temporal_endpoint=self.config.temporal_endpoint,
+                temporal_namespace=self.config.temporal_namespace,
+                temporal_task_queue=self.config.temporal_task_queue,
+                scheduler_timeout_seconds=self.config.scheduler_timeout_seconds,
+                honeycomb_root=str(self.config.honeycomb_root.resolve()),
+                vector_backend=self.config.vector_backend,
+                vector_collection=self.config.vector_collection,
+                vector_url=self.config.vector_url,
+                llm_provider=self.config.llm_provider,
+                ollama_base_url=self.config.ollama_base_url,
+                ollama_model=self.config.ollama_model,
+                ollama_timeout_seconds=self.config.ollama_timeout_seconds,
+                gemini_api_key=self.config.gemini_api_key,
+                gemini_model=self.config.gemini_model,
+                gemini_timeout_seconds=self.config.gemini_timeout_seconds,
+                searxng_base_url=self.config.searxng_base_url,
+            ),
+            scheduler=self.scheduler,
+            worker_runtime=self.worker_runtime,
+            build_celery_scheduler=self._build_celery_scheduler,
+            build_inline_scheduler=self._build_inline_scheduler,
+        )
+        self.policy_service = PolicyService(
+            honeycomb=self.honeycomb,
+            guardrail_engine=self.guardrail_engine,
+            policy_adapter=self.policy_adapter,
+            resolve_human_approval=self._resolve_human_approval,
+            execute_worker_task=self.dispatch_service.execute_worker_task,
+            build_worker_context=self._build_worker_context,
+        )
+
+        def _start_background(name: str, callback: Callable[[], None]) -> None:
+            threading.Thread(target=callback, daemon=True, name=name).start()
+
+        self.worker_forge_service = WorkerForgeService(
+            normalize_worker_kind=self._normalize_worker_kind,
+            list_workers=self.worker_registry.list_workers,
+            auto_spawn_worker=self._auto_spawn_worker,
+            write_event=self.honeycomb.write_event,
+            start_background=_start_background,
+        )
         self._tool_registry: ToolRegistry | None = None
         self._tool_executor: ToolExecutor | None = None
         self._tool_loop_engine: ToolLoopEngine | None = None
@@ -1245,40 +1304,10 @@ class QueenAgent:
 
     def _detect_skill_creation_intent(self, query: str) -> bool:
         """Return True if the query is asking to create a new skill/worker/tool."""
-        lower = query.lower()
-        return any(phrase in lower for phrase in self._SKILL_CREATION_PHRASES)
+        return self.planner_service.detect_skill_creation_intent(query)
 
     def _classify_intent_with_llm(self, query: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Use the LLM to classify query intent and suggest a worker.
-
-        Returns dict with keys: intent, worker_hint, tags, needs_delegation.
-        Falls back to empty dict on any error (routing continues algorithmically).
-        """
-        try:
-            dynamic_workers = self.worker_registry.format_workers_for_prompt()
-            if not dynamic_workers:
-                return {}
-            classification_prompt = (
-                "You are routing a user request. Given the available workers below, "
-                "respond with JSON only — no explanation, no markdown fences:\n"
-                '{"intent": "<short_snake_case_intent>", "worker_hint": "<worker_kind or empty string>", '
-                '"tags": ["tag1", "tag2"], "needs_delegation": true}\n\n'
-                f"{dynamic_workers}\n\n"
-                f"User query: {query}"
-            )
-            reply, _src = self.worker_runtime.direct_chat(
-                query=classification_prompt,
-                system="You are a routing classifier. Return only valid JSON.",
-            )
-            if not reply:
-                return {}
-            # Extract the first JSON object from the reply
-            json_match = re.search(r"\{[^{}]*\}", reply, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-            return json.loads(reply.strip())
-        except Exception:
-            return {}
+        return self.planner_service.classify_intent_with_llm(query, payload)
 
     def _route_worker_kind(self, intent: str, payload: dict[str, Any], trace_id: str | None = None) -> WorkerKind:
         if intent == "context_curation":
@@ -1321,32 +1350,11 @@ class QueenAgent:
         if worker_kind == WorkerKind.custom and worker_kind_str:
             payload["_runtime_worker_key"] = worker_kind_str
         if content_score == 0:
-            # No intent/payload/keyword matched — fire auto-spawn in background so THIS
-            # request returns immediately (ForgedWorker), and the generated worker is
-            # available for the NEXT request with the same intent.
-            worker_kind_str_bg = self._normalize_worker_kind(intent)
-            existing_bg = next(
-                (w for w in self.worker_registry.list_workers()
-                 if w.get("worker_kind") == worker_kind_str_bg),
-                None,
+            self.worker_forge_service.maybe_start_auto_spawn(
+                intent=intent,
+                payload=payload,
+                trace_id=trace_id,
             )
-            if not existing_bg:
-                threading.Thread(
-                    target=self._auto_spawn_worker,
-                    args=(intent, dict(payload)),
-                    daemon=True,
-                    name=f"auto_spawn_{worker_kind_str_bg}",
-                ).start()
-                if trace_id:
-                    self.honeycomb.write_event(
-                        trace_id,
-                        {
-                            "kind": "auto_spawn_started",
-                            "worker_kind": worker_kind_str_bg,
-                            "intent": intent,
-                            "content_score": content_score,
-                        },
-                    )
             return WorkerKind.forged
         feedback = self.honeycomb.read_routing_feedback()
         if feedback and worker_kind in {WorkerKind.web_search, WorkerKind.heavy_compute}:
@@ -1477,65 +1485,12 @@ class QueenAgent:
         parent_span_id: str | None = None,
         status_callback: Callable[[str], None] | None = None,
     ) -> tuple[ResultEnvelope, RetryCategory | None]:
-        context = self._build_worker_context(task, status_callback)
-        policy_task, budget_decision = self.guardrail_engine.apply_budget_controls(task, context.rule)
-        self.honeycomb.write_event(
-            task.queen_trace_id,
-            {
-                "kind": "budget_control",
-                "task_id": task.task_id,
-                "decision": budget_decision,
-                "model_tier": policy_task.payload.get("model_tier"),
-                "early_stop": bool(policy_task.payload.get("early_stop", False)),
-            },
-        )
-        base_policy = self.guardrail_engine.evaluate(policy_task, context.rule)
-        adapter_decision = self.policy_adapter.evaluate_task(
-            task=policy_task,
-            rule_profile=context.rule,
-            capability_manifest=context.capability_manifest,
-            base_policy=base_policy,
-        )
-        policy = adapter_decision_to_policy(policy_task.task_id, adapter_decision)
-        policy = self._resolve_human_approval(policy_task, policy)
-        self.honeycomb.write_policy_decision(policy, trace_id=task.queen_trace_id)
-        if policy.status == "block":
-            policy_task.status = Status.blocked
-            self.honeycomb.write_task(policy_task)
-            return ResultEnvelope(
-                task_id=policy_task.task_id,
-                agent_id=context.identity.agent_id,
-                worker_kind=policy_task.worker_kind,
-                status=Status.blocked,
-                confidence=0.0,
-                output={"error": policy.reason},
-                policy_flags=policy.guardrail_flags,
-                output_schema="PolicyBlock",
-            ), RetryCategory.policy
-        if policy.status == "needs_human":
-            policy_task.status = Status.blocked
-            self.honeycomb.write_task(policy_task)
-            return ResultEnvelope(
-                task_id=policy_task.task_id,
-                agent_id=context.identity.agent_id,
-                worker_kind=policy_task.worker_kind,
-                status=Status.blocked,
-                confidence=0.0,
-                output={
-                    "error": "awaiting_human_approval",
-                    "reason": policy.reason,
-                    "human_review_id": policy_task.payload.get("human_review_id"),
-                },
-                policy_flags=["needs_human_approval"],
-                output_schema="HumanApprovalPending",
-            ), RetryCategory.policy
-        result = self._execute_worker_task(
-            policy_task,
-            context,
+        return self.policy_service.run_task_with_policies(
+            task=task,
             scheduler_backend=scheduler_backend,
             parent_span_id=parent_span_id,
+            status_callback=status_callback,
         )
-        return result, None
 
     def _execute_worker_task(
         self,
@@ -1544,83 +1499,12 @@ class QueenAgent:
         scheduler_backend: str,
         parent_span_id: str | None = None,
     ) -> ResultEnvelope:
-        backend = scheduler_backend.strip().lower()
-        if backend == "temporal":
-            if not TEMPORAL_AVAILABLE:
-                raise RuntimeError("temporal_scheduler_requested_but_temporalio_not_installed")
-            temporal_client = TemporalBeekeeperClient(
-                TemporalConfig(
-                    endpoint=self.config.temporal_endpoint,
-                    namespace=self.config.temporal_namespace,
-                    task_queue=self.config.temporal_task_queue,
-                )
-            )
-            workflow_id = f"beekeeper-{task.queen_trace_id}-{task.task_id}"
-            payload = asyncio_run(
-                temporal_client.execute(
-                    workflow_id=workflow_id,
-                    task_payload=task.model_dump(mode="json"),
-                    context_payload={
-                        "identity": context.identity.model_dump(mode="json"),
-                        "skill": context.skill.model_dump(mode="json"),
-                        "rule": context.rule.model_dump(mode="json"),
-                        "soul": context.soul.model_dump(mode="json"),
-                        "abilities": context.abilities.model_dump(mode="json") if context.abilities else None,
-                        "accountability": context.accountability.model_dump(mode="json") if context.accountability else None,
-                        "guardrails": context.guardrails.model_dump(mode="json") if context.guardrails else None,
-                        "capability_manifest": context.capability_manifest.to_dict() if context.capability_manifest else None,
-                    },
-                    honeycomb_root=str(self.config.honeycomb_root.resolve()),
-                    vector_backend=self.config.vector_backend,
-                    vector_collection=self.config.vector_collection,
-                    vector_url=self.config.vector_url,
-                    llm_provider=self.config.llm_provider,
-                    ollama_base_url=self.config.ollama_base_url,
-                    ollama_model=self.config.ollama_model,
-                    ollama_timeout_seconds=self.config.ollama_timeout_seconds,
-                    gemini_api_key=self.config.gemini_api_key,
-                    gemini_model=self.config.gemini_model,
-                    gemini_timeout_seconds=self.config.gemini_timeout_seconds,
-                    searxng_base_url=self.config.searxng_base_url,
-                )
-            )
-            return ResultEnvelope.model_validate(payload)
-        if backend == "celery":
-            scheduler = self.scheduler if isinstance(self.scheduler, CeleryScheduler) else self._build_celery_scheduler()
-            job_id = scheduler.submit(
-                task.model_dump(mode="json"),
-                {
-                    "identity": context.identity.model_dump(mode="json"),
-                    "skill": context.skill.model_dump(mode="json"),
-                    "rule": context.rule.model_dump(mode="json"),
-                    "soul": context.soul.model_dump(mode="json"),
-                    "abilities": context.abilities.model_dump(mode="json") if context.abilities else None,
-                    "accountability": context.accountability.model_dump(mode="json") if context.accountability else None,
-                    "guardrails": context.guardrails.model_dump(mode="json") if context.guardrails else None,
-                    "capability_manifest": context.capability_manifest.to_dict() if context.capability_manifest else None,
-                },
-            )
-            payload = scheduler.collect(job_id, timeout_seconds=self.config.scheduler_timeout_seconds)
-            return ResultEnvelope.model_validate(payload)
-        if backend == "inline":
-            scheduler = self.scheduler if isinstance(self.scheduler, InlineScheduler) else self._build_inline_scheduler()
-            job_id = scheduler.submit(
-                task.model_dump(mode="json"),
-                {
-                    "identity": context.identity.model_dump(mode="json"),
-                    "skill": context.skill.model_dump(mode="json"),
-                    "rule": context.rule.model_dump(mode="json"),
-                    "soul": context.soul.model_dump(mode="json"),
-                    "abilities": context.abilities.model_dump(mode="json") if context.abilities else None,
-                    "accountability": context.accountability.model_dump(mode="json") if context.accountability else None,
-                    "guardrails": context.guardrails.model_dump(mode="json") if context.guardrails else None,
-                    "capability_manifest": context.capability_manifest.to_dict() if context.capability_manifest else None,
-                },
-            )
-            payload = scheduler.collect(job_id, timeout_seconds=self.config.scheduler_timeout_seconds)
-            return ResultEnvelope.model_validate(payload)
-        # Unknown scheduler values should not break execution.
-        return self.worker_runtime.run_once(task, context, parent_span_id=parent_span_id)
+        return self.dispatch_service.execute_worker_task(
+            task=task,
+            context=context,
+            scheduler_backend=scheduler_backend,
+            parent_span_id=parent_span_id,
+        )
 
     def _run_tool_loop(
         self,
@@ -1876,33 +1760,11 @@ class QueenAgent:
 
     def _select_execution_path(self, payload: dict[str, Any], action_result_present: bool) -> str:
         """Return the name of the execution path that will be (or was) taken."""
-        if action_result_present and payload.get("stop_after_actions"):
-            return "action_loop"
-        if self.config.execution_mode in ("model_tools", "hybrid"):
-            return "tool_loop"
-        if not self._should_delegate_to_workers(payload):
-            return "direct_chat"
-        return "worker_delegation"
+        return self.execution_mode_service.select_execution_path(payload, action_result_present)
 
     def _should_delegate_to_workers(self, payload: dict[str, Any]) -> bool:
         """False = Queen responds directly (Ollama only). True = delegate to workers."""
-        if payload.get("delegate_to_worker") is True:
-            return True
-        if payload.get("use_web_search") is True:
-            return True
-        if payload.get("domains"):
-            return True
-        if payload.get("numbers") is not None or payload.get("operation"):
-            return True
-        # File / directory operations must be delegated, not answered in direct chat
-        query = str(payload.get("query") or payload.get("topic") or "").strip()
-        if query and self._infer_file_action(query):
-            return True
-        if query and self._extract_save_to_file_request(query)[0]:
-            return True
-        if query and _looks_like_shell_task(query):
-            return True
-        return False
+        return self.execution_mode_service.should_delegate_to_workers(payload)
 
     _WORKER_STATUS: dict[WorkerKind, str] = {
         WorkerKind.web_search: "Dispatching to web search worker: querying index and synthesizing from sources…",
