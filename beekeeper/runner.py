@@ -1557,7 +1557,11 @@ def _run_reset_password(args: argparse.Namespace) -> int:
 
 def main() -> None:
     _load_env_early()
-    parser = argparse.ArgumentParser(prog="beekeeper", description="Beekeeper runtime CLI")
+    parser = argparse.ArgumentParser(
+        prog="beekeeper-legacy",
+        description="Beekeeper legacy runtime CLI",
+        epilog="Supported Phase 1 workflows now live under `beekeeper`. Use `beekeeper-legacy` only for the older runtime paths.",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run a beekeeper request")
@@ -1767,6 +1771,12 @@ def main() -> None:
     status_parser.add_argument("--once", action="store_true", help="Print once and exit (no live refresh)")
 
     args = parser.parse_args()
+    if args.command != "version":
+        print(
+            "[legacy] supported Phase 1 workflows now live under `beekeeper`; "
+            "use `beekeeper-legacy` only for older runtime paths.",
+            file=sys.stderr,
+        )
     try:
         _enforce_runtime_mode_or_exit(args.command)
     except ConfigValidationError as exc:

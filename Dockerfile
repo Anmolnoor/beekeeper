@@ -15,4 +15,4 @@ COPY scripts /app/scripts
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -e .
 
-CMD ["python", "-m", "beekeeper.demo"]
+CMD ["python", "-m", "queen_api.app"]

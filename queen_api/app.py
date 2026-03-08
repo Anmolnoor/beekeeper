@@ -1,16 +1,18 @@
-"""OpenAI-compatible API adapter for Beekeeper Lite."""
+"""Phase 1 control API for Beekeeper."""
 
 from __future__ import annotations
 
-import json
+from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
+from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from beekeeper.lite_agent import LiteAssistant
+from beekeeper.config.settings import Phase1Settings
+from beekeeper.lite_agent import LiteAssistant, LiteAssistantConfig
+from beekeeper.runtime import get_runtime_service
 
 
 def _load_env() -> None:
@@ -28,18 +30,46 @@ def _load_env() -> None:
 
 _load_env()
 
-app = FastAPI(title="Beekeeper Lite API", version="0.1.0")
-_assistant = LiteAssistant()
+app = FastAPI(title="Beekeeper Phase 1 API", version="0.1.0")
+_settings = Phase1Settings()
+_runtime = get_runtime_service(_settings)
+_assistant = LiteAssistant(LiteAssistantConfig(store_root=_settings.runtime_root / "store"))
 _STATIC_DIR = Path(__file__).parent / "static"
-MODEL_ID = "beekeeper-lite"
+
+class RunJobRequest(BaseModel):
+    job_type: str = "task"
+    worker_kind: str = "bash"
+    payload: dict = Field(default_factory=dict)
+
+
+class RunCreateRequest(BaseModel):
+    goal: str
+    workspace_path: str | None = None
+    background: bool = False
+    worker_kind: str = "bash"
+    job_type: str = "task"
+    payload: dict = Field(default_factory=dict)
+    jobs: list[RunJobRequest] = Field(default_factory=list)
+
+
+class ApprovalResolveRequest(BaseModel):
+    resolved_by: str = "api"
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = MODEL_ID
-    messages: list[dict] = Field(default_factory=list)
+    model: str = "beekeeper-lite"
+    messages: list[dict[str, Any]] = Field(default_factory=list)
     stream: bool = False
-    temperature: float | None = None
-    max_tokens: int | None = None
+
+
+def _model_dump(model: BaseModel) -> dict:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def _now_unix() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
 
 
 @app.get("/")
@@ -49,21 +79,27 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "queen-api", "mode": "lite"}
+    return {"status": "ok", "service": "queen-api", "mode": "phase1"}
 
 
 @app.get("/v1/models")
 def list_models():
     return {
         "object": "list",
-        "data": [{"id": MODEL_ID, "object": "model", "created": 0}],
+        "data": [
+            {
+                "id": "beekeeper-lite",
+                "object": "model",
+                "created": 0,
+                "owned_by": "beekeeper",
+            }
+        ],
     }
 
 
 @app.get("/v1/chats")
-def list_chats(user_id: str = "local-user", limit: int = 50):
-    chats = _assistant.list_chats(user_id=user_id, limit=limit)
-    return {"chats": chats}
+def list_chats(user_id: str = Query(...)):
+    return {"chats": _assistant.list_chats(user_id=user_id)}
 
 
 @app.get("/v1/chats/{chat_id}")
@@ -75,66 +111,86 @@ def get_chat(chat_id: str):
 
 
 @app.post("/v1/chat/completions")
-def chat_completions(
+def create_chat_completion(
     request: ChatCompletionRequest,
-    x_beekeeper_user_id: str | None = Header(None, alias="X-Beekeeper-User-Id"),
-    x_beekeeper_chat_id: str | None = Header(None, alias="X-Beekeeper-Chat-Id"),
-    x_beekeeper_model: str | None = Header(None, alias="X-Beekeeper-Model"),
+    beekeeper_user_id: str | None = Header(default=None, alias="X-Beekeeper-User-Id"),
+    beekeeper_chat_id: str | None = Header(default=None, alias="X-Beekeeper-Chat-Id"),
 ):
-    user_id = (x_beekeeper_user_id or "").strip() or "local-user"
-    model_override = (x_beekeeper_model or "").strip() or None
+    if request.stream:
+        raise HTTPException(status_code=400, detail="streaming_not_supported")
     result = _assistant.chat(
         messages=request.messages,
-        user_id=user_id,
-        chat_id=(x_beekeeper_chat_id or "").strip() or None,
-        model_override=model_override,
+        user_id=(beekeeper_user_id or "local-user").strip() or "local-user",
+        chat_id=(beekeeper_chat_id or "").strip() or None,
+        model_override=request.model,
     )
-    reply = result["reply"]
-    if request.stream:
-        return _stream_reply(reply)
+    created = _now_unix()
     return {
-        "id": f"chatcmpl-{uuid4().hex}",
+        "id": f"chatcmpl_{created}",
         "object": "chat.completion",
+        "created": created,
+        "model": request.model,
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": reply},
+                "message": {"role": "assistant", "content": result.get("reply", "")},
                 "finish_reason": "stop",
             }
         ],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+        "provider": result.get("provider", "fallback"),
         "chat_id": result.get("chat_id"),
-        "provider": result.get("provider"),
-        "title": result.get("title"),
+        "title": result.get("title", "New Chat"),
     }
 
 
-def _stream_reply(reply: str) -> StreamingResponse:
-    cid = f"chatcmpl-{uuid4().hex}"
+@app.post("/v1/runs")
+def create_run(request: RunCreateRequest):
+    run_request = _model_dump(request)
+    if request.jobs:
+        run_request["jobs"] = [_model_dump(job) for job in request.jobs]
+    run = _runtime.submit_run(run_request, background=request.background)
+    return run
 
-    def _generate():
-        yield "data: " + json.dumps(
-            {
-                "id": cid,
-                "object": "chat.completion.chunk",
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": reply},
-                        "finish_reason": None,
-                    }
-                ],
-            }
-        ) + "\n\n"
-        yield "data: " + json.dumps(
-            {
-                "id": cid,
-                "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }
-        ) + "\n\n"
-        yield "data: [DONE]\n\n"
 
-    return StreamingResponse(_generate(), media_type="text/event-stream")
+@app.get("/v1/runs/{run_id}")
+def get_run(run_id: str):
+    run = _runtime.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return run
+
+
+@app.get("/v1/runs/{run_id}/trace")
+def get_trace(run_id: str):
+    run = _runtime.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return {"run_id": run_id, "events": _runtime.get_trace(run_id)}
+
+
+@app.get("/v1/runs/{run_id}/artifacts")
+def get_artifacts(run_id: str):
+    run = _runtime.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return {"run_id": run_id, "artifacts": _runtime.get_artifacts(run_id)}
+
+
+@app.post("/v1/approvals/{approval_id}/approve")
+def approve(approval_id: str, request: ApprovalResolveRequest):
+    approval = _runtime.resolve_approval(approval_id, approved=True, resolved_by=request.resolved_by)
+    return approval
+
+
+@app.post("/v1/approvals/{approval_id}/reject")
+def reject(approval_id: str, request: ApprovalResolveRequest):
+    approval = _runtime.resolve_approval(approval_id, approved=False, resolved_by=request.resolved_by)
+    return approval
 
 
 def main() -> None:

@@ -5,12 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "beekeeper-agent-platform"
 version = "0.1.0"
-description = "Beekeeper-style multi-agent runtime with queen orchestration and ephemeral workers."
+description = "Beekeeper V1 runtime centered on Queen control, isolated workers, durable trace, and CLI control."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "python-dotenv>=1.0.0",
   "pydantic>=2.7.0",
+  "pydantic-settings>=2.3.0",
+  "sqlalchemy>=2.0.0",
+  "alembic>=1.13.0",
+  "psycopg[binary]>=3.2.0",
+  "minio>=7.2.0",
+  "openai>=1.50.0",
+  "httpx>=0.27.0",
+  "opentelemetry-api>=1.28.0",
+  "opentelemetry-sdk>=1.28.0",
+  "opentelemetry-exporter-otlp>=1.28.0",
   "eval_type_backport>=0.2.0",
   "celery>=5.4.0",
   "redis>=5.0.0",
@@ -31,8 +41,10 @@ dependencies = [
 
 [project.scripts]
 beekeeper = "beekeeper.cli.main:main"
+beekeeper-legacy = "beekeeper.runner:main"
 beekeeper-api = "beekeeper_api.app:main"
 queen-api = "queen_api.app:main"
+beekeeper-supervisor = "beekeeper.runtime.supervisor_entry:main"
 
 [tool.pytest.ini_options]
 filterwarnings = [
@@ -40,7 +52,20 @@ filterwarnings = [
 ]
 
 [tool.setuptools]
-packages = ["beekeeper", "beekeeper.config", "beekeeper.data_plane", "beekeeper.data_plane.repositories", "beekeeper.cli", "beekeeper.cli.commands", "beekeeper_api", "queen_api"]
+packages = [
+  "beekeeper",
+  "beekeeper.artifacts",
+  "beekeeper.cli",
+  "beekeeper.cli.commands",
+  "beekeeper.config",
+  "beekeeper.data_plane",
+  "beekeeper.data_plane.repositories",
+  "beekeeper.runtime",
+  "beekeeper.trace",
+  "beekeeper.workers",
+  "beekeeper_api",
+  "queen_api",
+]
 
 [tool.setuptools.package-data]
 beekeeper = ["souls/*.json", "souls/*.md"]

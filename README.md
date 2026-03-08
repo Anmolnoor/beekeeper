@@ -1,33 +1,40 @@
-# Beekeeper Lite
+# Beekeeper Phase 1
 
-This branch keeps the project focused on a simple personal assistant:
-- one assistant
-- one direct LLM chat loop
-- local chat persistence
-- OpenAI-compatible `/v1/chat/completions` for Open WebUI
-- a small built-in browser UI at `http://localhost:8788/`
+This branch is now centered on the Phase 1 Beekeeper runtime:
+- one Queen control plane
+- isolated `bash`, `filesystem`, `github`, and `network` workers
+- durable run state and append-only trace
+- Postgres for production state
+- MinIO for production artifacts
+- CLI-first control and inspection
 
-The older Queen / worker / governance stack still exists in the repo, but the main CLI chat/run path and `queen-api` now use the lite assistant flow by default.
+## Quick Start
 
-## Quick Start (5 min)
-
-```bash
-beekeeper chat
-```
-
-Or a single query:
+Bring up the whole supported stack with one command:
 
 ```bash
-beekeeper run --query "best agent sdk patterns"
+beekeeper start --build
 ```
 
-For a browser chat without Open WebUI:
+That starts Docker Compose, initializes the database schema, ensures the MinIO bucket exists, and prints the main service URLs.
+
+Run the same flow through `make` if you prefer:
 
 ```bash
-queen-api
+make start
 ```
 
-Then open `http://localhost:8788/`.
+Create a run once the stack is up:
+
+```bash
+beekeeper run "Show the repo status" --worker-kind github --payload '{"action":"status"}'
+```
+
+Legacy workflows are still available, but only through:
+
+```bash
+beekeeper-legacy --help
+```
 
 ## Core Concepts
 
@@ -56,23 +63,31 @@ Then open `http://localhost:8788/`.
 
 | Command | Description |
 |---------|-------------|
-| `beekeeper` | Health checks, auto-start Docker if needed |
-| `beekeeper chat` | Interactive chat |
-| `beekeeper run --query "..."` | Single query |
-| `beekeeper doctor` | Service health |
-| `beekeeper smoke-test` | Minimal end-to-end run + persistence check |
-| `beekeeper review list` | Pending HITL approvals |
-| `beekeeper review approve <id> --resume` | Approve and resume task |
-| `beekeeper init-tenant --org X --hive Y` | Create tenant |
-| `beekeeper channels set slack '{"slack_bot_token":"..."}'` | Configure channel |
+| `beekeeper start --build` | One command to build, start, and initialize the whole Phase 1 stack |
+| `beekeeper init` | Initialize the configured database schema and artifact bucket |
+| `beekeeper stack up --build` | Start the Docker stack |
+| `beekeeper stack down` | Stop the Docker stack |
+| `beekeeper stack ps` | Show service status |
+| `beekeeper stack logs [service]` | Show compose logs |
+| `beekeeper stack restart [service]` | Restart the stack or one service |
+| `beekeeper run ...` | Submit a run |
+| `beekeeper attach <run_id>` | Reattach to a run |
+| `beekeeper status <run_id>` | Inspect run state |
+| `beekeeper approve <approval_id> --by <name>` | Approve and resume a gated action |
+| `beekeeper trace <run_id>` | Show the append-only trace |
+| `beekeeper-legacy ...` | Access the old pre-Phase-1 command tree |
 
 ## Docker / Compose
 
 ```bash
-docker compose up --build
+beekeeper start --build
 ```
 
-Starts Redis, Temporal, Qdrant, SearXNG, Celery, Queen API (8788), Open WebUI (3000). Configure via `.env` (see `.env.example`).
+Starts Postgres, MinIO, `queen-api`, and the background supervisor. The compose file sets the production adapters by default:
+- `BEEKEEPER_DURABLE_STATE_BACKEND=postgres`
+- `BEEKEEPER_DATABASE_URL=postgresql+psycopg://...`
+- `BEEKEEPER_ARTIFACT_BACKEND=minio`
+- `BEEKEEPER_MINIO_ENDPOINT=minio:9000`
 
 ## Channels
 
@@ -110,3 +125,5 @@ Current request still falls back safely to `forged` execution if generation/load
 ## Migration from beehive
 
 Rename `BEEHIVE_*` → `BEEKEEPER_*`, `~/.beehive/` → `~/.beekeeper/`, use `beekeeper` CLI. Add `beekeeper-queen` to Open WebUI allowlist.
+
+If you still need the previous command surface during migration, use `beekeeper-legacy`.
