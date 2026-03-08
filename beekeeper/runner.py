@@ -83,6 +83,7 @@ from .worker_registry import WorkerRegistry
 from .trace_compaction import compact_traces
 from .pulse import PulseConfig, run_pulse_loop
 from .queen import QueenAgent, QueenConfig
+from .lite_agent import LiteAssistant
 from .runtime_env import resolve_searxng_base_url, validate_llm_provider_env
 from .store import BeekeeperStore
 
@@ -137,40 +138,15 @@ def _extract_primary_response(run_output: dict[str, Any]) -> dict[str, Any]:
 
 def _run_chat_loop(args: argparse.Namespace) -> int:
     import getpass
-    current_scheduler = getattr(args, "scheduler", "inline")
+
     model_override: str | None = None
-    cfg = _build_config(args, scheduler_override=current_scheduler)
-    queen = QueenAgent(cfg)
-    current_intent = args.intent
-    honeycomb_root = Path(args.honeycomb_root)
-    honeycomb_store = HoneycombStore(HoneycombConfig(root_dir=honeycomb_root))
-    verbose = getattr(args, "verbose", False)
+    assistant = LiteAssistant()
 
-    # User ID and memory store
     user_id = getattr(args, "user_id", None) or os.getenv("BEEKEEPER_USER_ID", "") or getpass.getuser()
-    store_root = Path(os.getenv("BEEKEEPER_STORE_ROOT", ".beekeeper_store"))
-    try:
-        _mem_store: BeekeeperStore | None = BeekeeperStore(store_root)
-    except Exception:
-        _mem_store = None
-
-    _pending_spawns: set[str] = set()
-
-    print("Beekeeper Queen chat")
-    print(f"User: {user_id}  |  Commands: /help, /intent, /model, /scheduler, /tree, /trace, /exit")
+    current_chat_id: str | None = None
+    print("Beekeeper Lite chat")
+    print(f"User: {user_id}  |  Commands: /help, /model, /new, /exit")
     while True:
-        # Notify about completed background spawns
-        if _pending_spawns:
-            try:
-                registry = WorkerRegistry(honeycomb_root)
-                current_kinds = {w.get("worker_kind", "") for w in registry.list_workers()}
-                completed = _pending_spawns & current_kinds
-                for wk in completed:
-                    print(f"\n  ✓ Worker '{wk}' is ready — it will handle similar tasks from now on.")
-                _pending_spawns -= completed
-            except Exception:
-                pass
-
         print()  # blank line before prompt for readability
         try:
             raw = input("you> ").strip()
@@ -187,171 +163,39 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
             return 0
         if raw == "/help":
             print("Commands:")
-            print("  /intent <name>      set the active Queen intent")
             print("  /model [name]       set or show LLM model override")
-            print("  /scheduler [be]     set scheduler (auto|inline|celery|temporal)")
-            print("  /tree [trace_id]    show trace tree")
-            print("  /trace [trace_id]   show trace events and details")
+            print("  /new                start a fresh local chat")
             print("  /exit               leave chat")
-            print("  Start chat with --quiet to suppress step-by-step progress.")
-            print("  Start chat with --verbose to show worker kind and confidence.")
             print("Input mode:")
-            print("  plain text       -> sent as payload {'query': <text>}")
-            print("  JSON object      -> sent as raw payload")
-            continue
-        if raw.startswith("/intent "):
-            next_intent = raw.replace("/intent ", "", 1).strip()
-            if not next_intent:
-                print("queen> intent cannot be empty")
-                continue
-            current_intent = next_intent
-            print(f"queen> active intent set to '{current_intent}'")
+            print("  plain text       -> sent directly to the assistant")
             continue
         if raw.startswith("/model"):
             rest = raw.replace("/model", "", 1).strip()
             if rest:
                 model_override = rest
-                print(f"queen> model override set to '{model_override}'")
+                print(f"assistant> model override set to '{model_override}'")
             else:
-                print(f"queen> model override: {model_override or '(none)'}")
+                print(f"assistant> model override: {model_override or '(none)'}")
             continue
-        if raw.startswith("/scheduler"):
-            rest = raw.replace("/scheduler", "", 1).strip()
-            if rest and rest in ("auto", "inline", "celery", "temporal"):
-                current_scheduler = rest
-                cfg = _build_config(args, scheduler_override=current_scheduler)
-                queen = QueenAgent(cfg)
-                print(f"queen> scheduler set to '{current_scheduler}'")
-            elif rest:
-                print("queen> scheduler must be auto, inline, celery, or temporal")
-            else:
-                print(f"queen> scheduler: {current_scheduler}")
+        if raw == "/new":
+            current_chat_id = None
+            print("assistant> started a new chat")
             continue
-        if raw.startswith("/tree"):
-            rest = raw.replace("/tree", "", 1).strip()
-            trace_id = rest
-            if not trace_id:
-                traces = honeycomb_store.list_traces(limit=1)
-                trace_id = traces[0] if traces else ""
-            if not trace_id:
-                print("queen> no trace_id and no recent traces")
-                continue
-            try:
-                tree = honeycomb_store.get_trace_tree(trace_id)
-                print(json.dumps(tree, ensure_ascii=True, indent=2))
-            except Exception as exc:
-                print(f"queen> tree failed: {exc}")
-            continue
-        if raw.startswith("/trace"):
-            rest = raw.replace("/trace", "", 1).strip()
-            trace_id = rest
-            if not trace_id:
-                traces = honeycomb_store.list_traces(limit=1)
-                trace_id = traces[0] if traces else ""
-            if not trace_id:
-                print("queen> no trace_id and no recent traces")
-                continue
-            try:
-                events = honeycomb_store.read_events(trace_id)
-                gov_path = honeycomb_store.governance_dir / f"{trace_id}.jsonl"
-                gov_events = honeycomb_store._read_jsonl(gov_path) if gov_path.exists() else []
-                out = {"trace_id": trace_id, "events": events, "governance": gov_events}
-                print(json.dumps(out, ensure_ascii=True, indent=2))
-            except Exception as exc:
-                print(f"queen> trace failed: {exc}")
-            continue
-
-        payload: dict[str, Any]
-        if raw.startswith("{") and raw.endswith("}"):
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                print(f"queen> invalid JSON payload: {exc}")
-                continue
-            if not isinstance(parsed, dict):
-                print("queen> JSON payload must be an object")
-                continue
-            payload = parsed
-        else:
-            payload = {"query": raw}
-        if model_override:
-            payload["model_override"] = model_override
-
-        # Attach user identity and memories
-        payload["user_id"] = user_id
-        if _mem_store is not None:
-            try:
-                user_memories = [
-                    {"content": m["content"]}
-                    for m in _mem_store.search_user_memories(user_id, query=raw, limit=12)
-                ]
-                if user_memories:
-                    payload["user_memories"] = user_memories
-            except Exception:
-                pass
-
-        def _on_status(msg: str) -> None:
-            print(f"  → {msg}", flush=True, file=sys.stderr)
 
         try:
-            output = queen.run(
-                intent=current_intent,
-                payload=payload,
-                source="cli",
-                status_callback=None if getattr(args, "quiet", False) else _on_status,
+            output = assistant.chat(
+                messages=[{"role": "user", "content": raw}],
+                user_id=user_id,
+                chat_id=current_chat_id,
+                model_override=model_override,
             )
         except Exception as exc:
-            print(f"queen> request failed: {exc}")
+            print(f"assistant> request failed: {exc}")
             continue
-        primary = _extract_primary_response(output)
-        worker_kind = primary.get("worker_kind", "unknown")
-        confidence = primary.get("confidence", 0.0)
-        response = primary.get("output", {})
-
-        # Check trace for auto-spawn events
-        trace_id = output.get("trace_id", "")
-        if trace_id:
-            try:
-                trace_events = honeycomb_store.read_events(trace_id)
-                spawn_events = [e for e in trace_events if e.get("kind") == "auto_spawn_started"]
-                for ev in spawn_events:
-                    wk = ev.get("worker_kind", "custom")
-                    print(f"\n  ⚡ New task type detected — building a custom worker ({wk}) in the background.")
-                    print(f"     This request was handled immediately. Future requests of this type will be faster.")
-                    _pending_spawns.add(wk)
-            except Exception:
-                pass
-
-        # Display reply
-        if isinstance(response, dict) and isinstance(response.get("assistant_reply"), str):
-            reply_text = response["assistant_reply"]
-            prefix = f"queen[{worker_kind}|conf={confidence:.2f}]" if verbose else "queen"
-            _console.print(f"[bold green]{prefix}>[/bold green]")
-            _console.print(RichMarkdown(reply_text))
-            if verbose:
-                _console.print(f"[dim](source: {response.get('response_source', 'unknown')})[/dim]")
-        else:
-            reply_text = ""
-            raw_json = json.dumps(response, ensure_ascii=True)
-            prefix = f"queen[{worker_kind}|conf={confidence:.2f}]" if verbose else "queen"
-            _console.print(f"[bold green]{prefix}>[/bold green] {raw_json}")
-
-        # Background context curation
-        def _curate(text: str = raw, reply: str = reply_text, uid: str = user_id) -> None:
-            try:
-                queen.run(
-                    intent="context_curation",
-                    payload={
-                        "user_msg": text[:1200],
-                        "assistant_reply": reply[:3000],
-                        "user_id": uid,
-                        "delegate_to_worker": True,
-                    },
-                    source="cli:context_curator",
-                )
-            except Exception:
-                pass
-        threading.Thread(target=_curate, daemon=True).start()
+        current_chat_id = output.get("chat_id")
+        reply_text = str(output.get("reply", "")).strip() or "No response."
+        _console.print("[bold green]assistant>[/bold green]")
+        _console.print(RichMarkdown(reply_text))
 
 
 @dataclass
@@ -1362,8 +1206,7 @@ def _print_llm_run_preflight() -> bool:
         print(f"[WARN] {warning}")
     if errors:
         for error in errors:
-            print(f"[FAIL] {error}", file=sys.stderr)
-        return False
+            print(f"[WARN] {error}", file=sys.stderr)
     return True
 
 
@@ -1938,10 +1781,17 @@ def main() -> None:
     if args.command == "run":
         if not _print_llm_run_preflight():
             raise SystemExit(1)
-        cfg = _build_config(args)
-        queen = QueenAgent(cfg)
         payload = _parse_payload(args.payload, args.query)
-        output = queen.run(intent=args.intent, payload=payload, source="cli")
+        query = str(payload.get("query", "")).strip()
+        if not query:
+            print(json.dumps({"ok": False, "error": "missing query"}, indent=2))
+            return
+        assistant = LiteAssistant()
+        output = assistant.chat(
+            messages=[{"role": "user", "content": query}],
+            user_id=os.getenv("BEEKEEPER_USER_ID", "cli-user"),
+            model_override=payload.get("model_override"),
+        )
         print(json.dumps(output, indent=2))
         return
     if args.command == "chat":

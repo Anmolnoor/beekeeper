@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Beekeeper Lite</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --panel: #fffaf2;
+      --line: #d9ccb7;
+      --text: #1b1a17;
+      --muted: #6a6257;
+      --accent: #b44c2f;
+      --accent-dark: #8c3b24;
+      --user: #f5dcc5;
+      --assistant: #ece2d3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Avenir Next", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(180, 76, 47, 0.16), transparent 28%),
+        linear-gradient(180deg, #f7f0e6 0%, #efe5d6 100%);
+      min-height: 100vh;
+    }
+    .shell {
+      width: min(1100px, 100%);
+      margin: 0 auto;
+      padding: 24px;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 280px minmax(0, 1fr);
+    }
+    .panel {
+      background: rgba(255, 250, 242, 0.88);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 12px 50px rgba(46, 33, 17, 0.08);
+      backdrop-filter: blur(10px);
+    }
+    .sidebar {
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: calc(100vh - 48px);
+    }
+    .brand {
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .brand h1 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 30px;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+    }
+    .brand p,
+    .helper,
+    .muted {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .sidebar input,
+    .composer textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--text);
+      padding: 12px 14px;
+      font: inherit;
+    }
+    .sidebar button,
+    .composer button {
+      border: 0;
+      border-radius: 12px;
+      background: var(--accent);
+      color: white;
+      padding: 11px 14px;
+      font: inherit;
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+    .sidebar button:hover,
+    .composer button:hover {
+      background: var(--accent-dark);
+    }
+    #chat-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow: auto;
+    }
+    .chat-link {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.5);
+      cursor: pointer;
+    }
+    .chat-link.active {
+      border-color: var(--accent);
+      background: rgba(180, 76, 47, 0.08);
+    }
+    .chat-link strong {
+      display: block;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+    .chat-link span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .main {
+      min-height: calc(100vh - 48px);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    .topbar {
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--line);
+    }
+    .topbar h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+    .messages {
+      padding: 22px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .message {
+      max-width: min(720px, 100%);
+      border-radius: 18px;
+      padding: 14px 16px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .message.user {
+      align-self: flex-end;
+      background: var(--user);
+    }
+    .message.assistant {
+      align-self: flex-start;
+      background: var(--assistant);
+    }
+    .message .meta {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .composer {
+      border-top: 1px solid var(--line);
+      padding: 18px 22px;
+      display: grid;
+      gap: 10px;
+    }
+    .composer-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    .composer textarea {
+      min-height: 92px;
+      resize: vertical;
+    }
+    .status {
+      min-height: 20px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @media (max-width: 880px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+      .sidebar,
+      .main {
+        min-height: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="brand">
+        <h1>Beekeeper Lite</h1>
+        <p>One assistant. One chat loop. No worker theater.</p>
+      </div>
+      <label>
+        <div class="helper">User ID</div>
+        <input id="user-id" type="text" value="local-user">
+      </label>
+      <button id="new-chat" type="button">New Chat</button>
+      <div class="helper">Recent chats</div>
+      <div id="chat-list"></div>
+    </aside>
+
+    <main class="panel main">
+      <div class="topbar">
+        <h2 id="chat-title">New Chat</h2>
+        <p class="muted">Open WebUI can still use `/v1/chat/completions`, but this page is the shortest path to test the assistant.</p>
+      </div>
+      <section id="messages" class="messages"></section>
+      <form id="composer" class="composer">
+        <div class="status" id="status"></div>
+        <div class="composer-row">
+          <textarea id="prompt" placeholder="Ask something practical."></textarea>
+          <button type="submit">Send</button>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <script>
+    const state = {
+      chatId: null,
+      messages: [],
+    };
+
+    const chatListEl = document.getElementById("chat-list");
+    const messagesEl = document.getElementById("messages");
+    const statusEl = document.getElementById("status");
+    const promptEl = document.getElementById("prompt");
+    const userIdEl = document.getElementById("user-id");
+    const titleEl = document.getElementById("chat-title");
+
+    function userId() {
+      return userIdEl.value.trim() || "local-user";
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text || "";
+    }
+
+    function renderMessages() {
+      messagesEl.innerHTML = "";
+      if (!state.messages.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted";
+        empty.textContent = "No messages yet.";
+        messagesEl.appendChild(empty);
+        return;
+      }
+      state.messages.forEach((message) => {
+        const node = document.createElement("div");
+        node.className = `message ${message.role === "user" ? "user" : "assistant"}`;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = message.role;
+        const content = document.createElement("div");
+        content.textContent = message.content || "";
+        node.appendChild(meta);
+        node.appendChild(content);
+        messagesEl.appendChild(node);
+      });
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function renderChats(chats) {
+      chatListEl.innerHTML = "";
+      chats.forEach((chat) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `chat-link${chat.chat_id === state.chatId ? " active" : ""}`;
+        button.innerHTML = `<strong>${chat.title || "New Chat"}</strong><span>${chat.updated_at || ""}</span>`;
+        button.addEventListener("click", () => loadChat(chat.chat_id));
+        chatListEl.appendChild(button);
+      });
+    }
+
+    async function refreshChats() {
+      const response = await fetch(`/v1/chats?user_id=${encodeURIComponent(userId())}`);
+      const data = await response.json();
+      renderChats(data.chats || []);
+    }
+
+    async function loadChat(chatId) {
+      const response = await fetch(`/v1/chats/${encodeURIComponent(chatId)}`);
+      if (!response.ok) {
+        setStatus("Failed to load chat.");
+        return;
+      }
+      const data = await response.json();
+      state.chatId = data.chat_id;
+      state.messages = data.messages || [];
+      titleEl.textContent = data.title || "New Chat";
+      renderMessages();
+      refreshChats();
+    }
+
+    async function sendMessage(event) {
+      event.preventDefault();
+      const prompt = promptEl.value.trim();
+      if (!prompt) {
+        return;
+      }
+      const outgoing = [...state.messages, { role: "user", content: prompt }];
+      state.messages = outgoing;
+      renderMessages();
+      promptEl.value = "";
+      setStatus("Waiting for model response...");
+
+      const response = await fetch("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Beekeeper-User-Id": userId(),
+          ...(state.chatId ? { "X-Beekeeper-Chat-Id": state.chatId } : {}),
+        },
+        body: JSON.stringify({
+          model: "beekeeper-lite",
+          stream: false,
+          messages: outgoing,
+        }),
+      });
+
+      if (!response.ok) {
+        setStatus("Request failed.");
+        return;
+      }
+
+      const data = await response.json();
+      state.chatId = data.chat_id || state.chatId;
+      const reply = data.choices?.[0]?.message?.content || "No response.";
+      state.messages = [...outgoing, { role: "assistant", content: reply }];
+      titleEl.textContent = data.title || prompt.slice(0, 60) || "New Chat";
+      renderMessages();
+      await refreshChats();
+      setStatus(data.provider ? `Response from ${data.provider}.` : "");
+    }
+
+    document.getElementById("composer").addEventListener("submit", sendMessage);
+    document.getElementById("new-chat").addEventListener("click", () => {
+      state.chatId = null;
+      state.messages = [];
+      titleEl.textContent = "New Chat";
+      renderMessages();
+      setStatus("");
+    });
+    userIdEl.addEventListener("change", () => {
+      state.chatId = null;
+      state.messages = [];
+      titleEl.textContent = "New Chat";
+      renderMessages();
+      refreshChats();
+    });
+
+    renderMessages();
+    refreshChats();
+  </script>
+</body>
+</html>

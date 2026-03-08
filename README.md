@@ -1,21 +1,33 @@
-# Beekeeper Agent Platform
+# Beekeeper Lite
 
-**Governed agent runtime with tool-level policy enforcement:** Queen orchestrates tasks, and every tool call is checked against guardrails. Honeycomb is used as a developer-friendly trace/audit adapter (not authoritative production state).
+This branch keeps the project focused on a simple personal assistant:
+- one assistant
+- one direct LLM chat loop
+- local chat persistence
+- OpenAI-compatible `/v1/chat/completions` for Open WebUI
+- a small built-in browser UI at `http://localhost:8788/`
+
+The older Queen / worker / governance stack still exists in the repo, but the main CLI chat/run path and `queen-api` now use the lite assistant flow by default.
 
 ## Quick Start (5 min)
 
 ```bash
-beekeeper quickstart
 beekeeper chat
 ```
 
 Or a single query:
 
 ```bash
-beekeeper run --scheduler auto --vector memory --query "best agent sdk patterns"
+beekeeper run --query "best agent sdk patterns"
 ```
 
-**First-run wizard:** On a fresh install (no `.env`, no store), visit `/` or `/setup` to configure LLM, API keys, and channels. Runs once.
+For a browser chat without Open WebUI:
+
+```bash
+queen-api
+```
+
+Then open `http://localhost:8788/`.
 
 ## Core Concepts
 
