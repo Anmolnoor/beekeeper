@@ -74,10 +74,12 @@ class OllamaProvider(LLMProvider):
         base_url: str = "http://localhost:11434",
         model: str = "llama2",
         timeout_seconds: int = 120,
+        api_key: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = max(5, timeout_seconds)
+        self.api_key = (api_key or "").strip()
 
     def chat(
         self,
@@ -101,10 +103,13 @@ class OllamaProvider(LLMProvider):
             payload = {"model": model, "prompt": prompt, "stream": False}
             if system:
                 payload["system"] = system
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
             url=url,
             method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
         )
         try:
@@ -467,6 +472,7 @@ class LLMRouter:
                         base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
                         model=os.getenv("BEEKEEPER_OLLAMA_MODEL", "llama3.2"),
                         timeout_seconds=int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")),
+                        api_key=os.getenv("BEEKEEPER_OLLAMA_API_KEY", ""),
                     )
                 )
             elif name == "gemini":
@@ -496,6 +502,7 @@ class LLMRouter:
                     base_url=os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434"),
                     model=os.getenv("BEEKEEPER_OLLAMA_MODEL", "llama3.2"),
                     timeout_seconds=int(os.getenv("BEEKEEPER_OLLAMA_TIMEOUT_SECONDS", "120")),
+                    api_key=os.getenv("BEEKEEPER_OLLAMA_API_KEY", ""),
                 )
             )
         return cls(providers)
@@ -508,6 +515,7 @@ def build_llm_router(
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "llama3.2",
     ollama_timeout_seconds: int = 120,
+    ollama_api_key: str | None = None,
     gemini_api_key: str = "",
     gemini_model: str = "gemini-1.5-flash",
     gemini_timeout_seconds: int = 120,
@@ -517,6 +525,8 @@ def build_llm_router(
     openai_timeout_seconds: int = 120,
 ) -> LLMRouter:
     """Build LLMRouter from explicit config (for WorkerRuntime, etc.)."""
+    if ollama_api_key is None:
+        ollama_api_key = os.getenv("BEEKEEPER_OLLAMA_API_KEY", "")
     if llm_providers:
         names = [p.strip().lower() for p in llm_providers.split(",") if p.strip()]
     else:
@@ -532,6 +542,7 @@ def build_llm_router(
                     base_url=ollama_base_url,
                     model=ollama_model,
                     timeout_seconds=ollama_timeout_seconds,
+                    api_key=ollama_api_key,
                 )
             )
         elif name == "gemini" and gemini_api_key:
@@ -557,6 +568,7 @@ def build_llm_router(
                 base_url=ollama_base_url,
                 model=ollama_model,
                 timeout_seconds=ollama_timeout_seconds,
+                api_key=ollama_api_key,
             )
         )
     return LLMRouter(providers)

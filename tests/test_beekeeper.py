@@ -13,7 +13,7 @@ def test_queen_run_creates_results(tmp_path: Path) -> None:
     assert out["trace_id"].startswith("trace_")
     assert len(out["results"]) >= 1
     assert out["queen_soul_profile_id"] == "soul.queen.crown"
-    assert out["ollama_base_url"].startswith("http://")
+    assert out["ollama_base_url"].startswith(("http://", "https://"))
 
 
 def test_guardrail_blocks_pii(tmp_path: Path) -> None:
