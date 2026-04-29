@@ -1,3 +1,10 @@
+"""Command-line runner and operational entrypoints for the Beekeeper prototype.
+
+The runner loads local environment, builds Queen configuration, exposes health
+and review commands, and starts supporting operational loops. It is intentionally
+kept honest as a broad CLI surface that still needs decomposition.
+"""
+
 from __future__ import annotations
 
 import argparse

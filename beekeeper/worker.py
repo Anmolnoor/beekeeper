@@ -1,3 +1,10 @@
+"""Worker runtime and built-in worker implementations for Beekeeper tasks.
+
+Workers execute typed task envelopes under guardrails, optional tool policy, and
+trace capture. This file still combines runtime plumbing with concrete worker
+behavior, so treat it as a prototype boundary rather than a final extension API.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

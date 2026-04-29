@@ -1,3 +1,9 @@
+"""Append-only trace, artifact, governance, and replay storage for Beekeeper.
+
+Honeycomb is a developer-facing event log and debugging surface. It is useful
+for audit trails and local replay, but it is not authoritative production state.
+"""
+
 from __future__ import annotations
 
 import json

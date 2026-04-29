@@ -1,3 +1,11 @@
+"""Queen orchestration layer for planning, policy checks, and worker dispatch.
+
+This module currently owns several responsibilities: intent planning, scheduler
+selection, policy mediation, worker routing, trace emission, and recovery loops.
+It is intentionally documented as a prototype god object until those
+responsibilities are split into smaller services.
+"""
+
 from __future__ import annotations
 
 import hashlib
