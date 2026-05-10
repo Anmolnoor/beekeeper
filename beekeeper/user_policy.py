@@ -6,9 +6,9 @@ Stored at: .beekeeper_store/users/{user_id}/policy.json
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any  # noqa: F401  (used in string-form annotations)
 
 from pydantic import BaseModel, Field
 

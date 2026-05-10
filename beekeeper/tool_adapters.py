@@ -222,8 +222,6 @@ def _action_tool_specs() -> list[ToolSpec]:
 
 def _make_worker_executor(worker_runtime: Any, honeycomb: Any, registry: Any) -> dict[str, tuple[ToolSpec, Any]]:
     """Build ToolSpec + executor for each worker. context must have trace_id, and may have rule/soul from registry."""
-    from .contracts import TaskEnvelope
-    from .worker import WorkerContext
 
     specs = _worker_tool_specs()
     out: dict[str, tuple[ToolSpec, Any]] = {}
@@ -337,7 +335,6 @@ def _make_action_executor(
     action_context_factory: Callable[[], ActionContext],
 ) -> dict[str, tuple[ToolSpec, Any]]:
     """Build ToolSpec + executor for each Queen action."""
-    from .contracts import QueenActionRequest
 
     specs = _action_tool_specs()
     out: dict[str, tuple[ToolSpec, Any]] = {}

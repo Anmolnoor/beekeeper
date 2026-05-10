@@ -1,93 +1,65 @@
-# Beekeeper
+# Beekeeper Agent Platform
 
-An experimental multi-agent orchestrator built around three ideas:
+[![CI](https://github.com/Anmolnoor/beekeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/Anmolnoor/beekeeper/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](pyproject.toml)
+[![Contributions: gated](https://img.shields.io/badge/contributions-gated-orange)](CONTRIBUTING.md)
 
-1. A central planner, the Queen, decomposes a request into typed tasks.
-2. Ephemeral workers execute those tasks under per-action policy gates.
-3. Honeycomb records an append-only event trace for decisions, artifacts, and review.
+**Governed agent runtime with tool-level policy enforcement:** Queen orchestrates tasks, and every tool call is checked against guardrails. Honeycomb is used as a developer-friendly trace/audit adapter (not authoritative production state).
 
-Status: research / personal use. Not production-ready. The architecture is more
-ambitious than the current implementation. Read the status matrix below before
-adopting any of this.
+> **Heads-up for contributors:** new issues and PRs from non-allowlisted contributors are auto-closed by default. This is intentional. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or PR — it explains the gate, the `lgtm`/`lgtmi` approval flow, and the quality bar.
 
-This is also a side learning project. Part of the point is to understand how AI
-agent systems work under the hood: how planning gets broken into actions, how
-guardrails can be enforced before tools run, how logs and monitors make behavior
-visible, and how human review fits into automated workflows.
-
-## What is actually shipping
-
-| Subsystem | Status | Notes |
-|-----------|--------|-------|
-| Queen -> Worker dispatch | Working locally | Core tests cover basic planning, dispatch, reruns, and results. |
-| Per-action user policy gate | Working locally | `allow` / `ask` / `deny` decisions are enforced through the tool path. |
-| HITL approval flow | Working locally | Review queue, API endpoints, and persistence exist; UI is minimal. |
-| Honeycomb event log | Partial | Append-only traces, artifacts, replay data, and SSE stream. Not authoritative state. |
-| LLM provider chain | Working locally | Configurable provider order across OpenAI, Gemini, and Ollama. |
-| Worker registry / forge | Experimental | Can register/generated workers for unmatched intents. Promotion and sandboxing are incomplete. |
-| Scheduler backends | Mixed | Inline works for local runs; Celery and Temporal paths require external services. |
-| Slack channel | Working depth-first | Primary channel path. Keep treating it as integration-tested, not hardened. |
-| Telegram / Discord / WhatsApp | Skeleton / experimental | Adapters exist, but verification depth is not equal to Slack. |
-| Multi-tenant quotas | Skeleton | Models and docs exist; hot-path enforcement is not complete. |
-| Production deploy story | Not implemented | Postgres + Temporal + object storage is the intended path, not a proven deploy. |
-| CI | Not implemented | Run `pytest` locally. |
-
-## Quick Start (No Docker)
-
-```bash
-pip install -e .
-cp .env.example .env
-# edit .env to set one provider key, such as BEEKEEPER_OPENAI_API_KEY,
-# BEEKEEPER_GEMINI_API_KEY, or BEEKEEPER_OLLAMA_API_KEY
-beekeeper run --scheduler inline --vector memory --query "What is 2+2?"
-```
-
-The CLI also has a guided path:
+## Quick Start (5 min)
 
 ```bash
 beekeeper quickstart
 beekeeper chat
 ```
 
-On a fresh install, the API exposes a first-run setup wizard at `/` and `/setup`
-for LLM keys, channels, and local configuration.
+Or a single query:
 
-## Known limitations
+```bash
+beekeeper run --scheduler auto --vector memory --query "best agent sdk patterns"
+```
 
-- God objects: `beekeeper/queen.py`, `beekeeper/runner.py`, and `beekeeper/worker.py` still hold multiple concerns and need decomposition.
-- Three execution modes coexist: legacy worker dispatch, model-driven tool loop, and hybrid mode. The roadmap is to converge on the hybrid path and delete the rest.
-- Honeycomb is advisory. It is an event trace and local debugging surface, not the source of truth for production state.
-- No CI yet. Tests run locally with `pytest`.
-- Worker forge is powerful and risky. Generated worker code does not yet pass a full promotion, signing, sandbox, and provenance pipeline.
-- Channels are broader than the verification depth. Slack is the focus; other adapters should be treated as experiments.
+**First-run wizard:** On a fresh install (no `.env`, no store), visit `/` or `/setup` to configure LLM, API keys, and channels. Runs once.
 
-## Why this exists
+## Core Concepts
 
-I am publishing Beekeeper to get feedback on three specific ideas:
+- **Queen** — Planner/router that decomposes intents into tasks and delegates to workers.
+- **Workers** — Ephemeral specialists: `web_search`, `heavy_compute`, `audit`, and `forged` (for unmatched intents).
+- **Honeycomb** — Developer-friendly append-only timeline for traces/events and local debugging.
+- **Tools** — Model-driven tool loop (ToolLoopEngine) with policy checks; optional MCP servers (stdio/HTTP) for external tools.
 
-1. Is per-action policy gating with `allow` / `ask` / `deny` the right primitive
-   for agent governance, or is it too coarse?
-2. Is an append-only event log the right shape for agent audit, or does useful
-   audit require authoritative state from day one?
-3. Is Queen -> Worker decomposition useful in practice, or does it collapse into
-   a single agent loop in real use?
+## Support and Maturity
 
-If you have worked on these problems, open an issue or PR. This is personal-time
-work, so response times and stability are not guaranteed.
+- Supported production path target: Postgres + Temporal + S3-compatible object storage + policy mediation + OpenTelemetry.
+- Storage tiers are explicit: dev/local JSONL+filesystem, prod metadata Postgres, prod event/log pipeline, object artifacts, and Qdrant for vectors.
+- Current channel focus: Slack depth first; other channels are available but not considered equally hardened.
+- Worker forge/generation: experimental until full promotion, sandboxing, and provenance gates are met.
+- Credibility posture: experimental worker forge, prototype dashboard, logical multi-tenancy, unit-tested core with limited live integration coverage.
+- Detailed status: [docs/support-matrix.md](docs/support-matrix.md), [docs/maturity-model.md](docs/maturity-model.md), [docs/risks-and-known-gaps.md](docs/risks-and-known-gaps.md)
 
-## Core commands
+## What makes Beekeeper different
+
+- **Tool-level policy** — Every tool goes through the ToolRegistry and guardrails (PII, domain allowlists, HITL for high-risk tools). No raw tool execution without policy.
+- **Dual execution** — Legacy worker dispatch and/or model-driven tool loop; run in `legacy_worker`, `model_tools`, or `hybrid` mode. Optional MCP tools from external servers.
+- **Governance and audit** — Honeycomb records every event; HITL for sensitive actions; optional audit worker for validation.
+- Unlike generic agent frameworks (e.g. LangGraph) or pure chat gateways (e.g. OpenClaw), Beekeeper is built for teams that need policy enforcement, audit trails, and human-in-the-loop on tool use.
+
+## Key Commands
 
 | Command | Description |
 |---------|-------------|
-| `beekeeper quickstart` | Guided local setup |
-| `beekeeper chat` | Interactive chat loop |
+| `beekeeper` | Health checks, auto-start Docker if needed |
+| `beekeeper chat` | Interactive chat |
 | `beekeeper run --query "..."` | Single query |
-| `beekeeper doctor` | Service and config health checks |
-| `beekeeper smoke-test` | Minimal end-to-end run plus persistence check |
+| `beekeeper doctor` | Service health |
+| `beekeeper smoke-test` | Minimal end-to-end run + persistence check |
 | `beekeeper review list` | Pending HITL approvals |
-| `beekeeper review approve <id> --resume` | Approve and resume a task |
-| `beekeeper init-tenant --org X --hive Y` | Create tenant metadata |
-| `beekeeper channels set slack '{"slack_bot_token":"..."}'` | Configure Slack |
+| `beekeeper review approve <id> --resume` | Approve and resume task |
+| `beekeeper init-tenant --org X --hive Y` | Create tenant |
+| `beekeeper channels set slack '{"slack_bot_token":"..."}'` | Configure channel |
 
 ## Docker / Compose
 
@@ -95,27 +67,56 @@ work, so response times and stability are not guaranteed.
 docker compose up --build
 ```
 
-Compose starts Redis, Temporal, Qdrant, SearXNG, Celery, Queen API, and Open
-WebUI. Configure via `.env` copied from `.env.example`.
+Starts Redis, Temporal, Qdrant, SearXNG, Celery, Queen API (8788), Open WebUI (3000). Configure via `.env` (see `.env.example`).
 
-## Dashboard and HITL
+## Channels
 
-Open `http://localhost:8788/dashboard` for local channel setup, templates, orgs,
-and HITL approvals. High-risk actions such as `payment_action` and `data_delete`
-enter the review queue and can be approved through the dashboard, CLI, or API.
+- **Slack** — primary supported channel path.
+- **Telegram, Discord** — available, currently treated as experimental depth.
+- **WhatsApp** — Cloud API; supports text and audio/voice (transcription via OpenAI Whisper if `BEEKEEPER_OPENAI_API_KEY` set).
+
+## Dashboard
+
+Open `http://localhost:8788/dashboard` (or 8787 in Docker). Sign in to manage channels, templates, orgs, and **HITL approvals** (approve/reject pending tasks). For Grafana, add Beekeeper API as JSON datasource and use `/api/analytics/latency`.
+
+## HITL Approval
+
+High-risk actions (e.g. `payment_action`, `data_delete`) require human approval. Pending items appear in the dashboard and via `beekeeper review list`. Approve via API: `POST /api/approvals/{id}/approve`. Push notifications to WhatsApp/Telegram when configured (`hitl_notify_chat_id`, `hitl_notify_phone`).
+
+## Worker Forge
+
+Worker forge is currently **experimental**.
+
+When no worker matches an intent (no content match), Queen auto-forges a custom worker on demand by:
+- registering a `custom_*` worker profile in the worker registry,
+- generating a worker plugin in `.honeycomb/workers/generated/`,
+- updating `.honeycomb/workers/plugins.json`, and
+- hot-reloading worker plugins at runtime.
+
+Current request still falls back safely to `forged` execution if generation/loading fails; subsequent matching intents route through the generated custom worker.
 
 ## Docs
 
-- [docs/ONBOARDING.md](docs/ONBOARDING.md) - Setup guide
-- [docs/support-matrix.md](docs/support-matrix.md) - Support depth and boundaries
-- [docs/maturity-model.md](docs/maturity-model.md) - Maturity labels
-- [docs/risks-and-known-gaps.md](docs/risks-and-known-gaps.md) - Current risks
-- [docs/DECISION_TREE.md](docs/DECISION_TREE.md) - Scheduler, worker, and channel choices
-- [docs/PROMPT_TEMPLATES.md](docs/PROMPT_TEMPLATES.md) - Prompt customization
-- [docs/REMOTE_ACCESS_AND_TAILSCALE.md](docs/REMOTE_ACCESS_AND_TAILSCALE.md) - Remote access
+- [docs/ONBOARDING.md](docs/ONBOARDING.md) — Setup guide
+- [docs/DECISION_TREE.md](docs/DECISION_TREE.md) — Scheduler, worker, channel choices
+- [docs/PROMPT_TEMPLATES.md](docs/PROMPT_TEMPLATES.md) — Customize prompts
+- [docs/REMOTE_ACCESS_AND_TAILSCALE.md](docs/REMOTE_ACCESS_AND_TAILSCALE.md) — Remote access
 
 ## Migration from beehive
 
-Rename `BEEHIVE_*` to `BEEKEEPER_*`, `~/.beehive/` to `~/.beekeeper/`, and use
-the `beekeeper` CLI. Add `beekeeper-queen` to the Open WebUI allowlist if you use
-that integration.
+Rename `BEEHIVE_*` → `BEEKEEPER_*`, `~/.beehive/` → `~/.beekeeper/`, use `beekeeper` CLI. Add `beekeeper-queen` to Open WebUI allowlist.
+
+## Contributing
+
+Beekeeper is a small project with a small maintainer pool. To keep the signal high, **issues and PRs from non-allowlisted contributors are auto-closed by default.** This is not hostile — it's a buffer that lets the tracker be reviewed on a maintainer's schedule instead of the tracker's.
+
+- Read **[CONTRIBUTING.md](CONTRIBUTING.md)** before opening anything. It explains the gate, the `lgtm`/`lgtmi` approval flow, the quality bar for issues, and the pre-PR checks.
+- Read **[AGENTS.md](AGENTS.md)** if you're using a coding agent (Claude Code, pi, Cursor, etc.) on this repo.
+- Use **[Discussions](https://github.com/Anmolnoor/beekeeper/discussions)** for questions, ideas, and use cases — Discussions are not gated.
+- Report security issues via **[SECURITY.md](SECURITY.md)**, never as public issues.
+
+The contribution gate is adapted from [`badlogic/pi-mono`](https://github.com/badlogic/pi-mono).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

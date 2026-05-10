@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and discussion
+    url: https://github.com/Anmolnoor/beekeeper/discussions
+    about: Ask questions, share use cases, or propose ideas. Discussions are not gated; the issue tracker is.
+  - name: Security vulnerability
+    url: https://github.com/Anmolnoor/beekeeper/security/advisories/new
+    about: Report a security issue privately. Do not file security issues in the public tracker.

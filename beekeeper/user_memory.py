@@ -5,7 +5,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable  # noqa: F401  (Any used in string-form annotations)
 
 from .worker import WebSearchWorker
 

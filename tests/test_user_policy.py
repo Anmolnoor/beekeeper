@@ -1,10 +1,8 @@
 """Tests for user_policy.py unit functions and related API endpoints."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from beekeeper.user_policy import (

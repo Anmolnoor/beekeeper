@@ -1,1 +1,0 @@
-I could not reach any configured LLM. Check Ollama connectivity, BEEKEEPER_GEMINI_API_KEY, and Gemini billing/quota.

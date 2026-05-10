@@ -14,7 +14,6 @@ import os
 import re
 import threading
 import time
-from asyncio import run as asyncio_run
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -61,7 +60,6 @@ from .scheduler import (
 )
 from .soul import load_queen_soul
 from .audit_logger import log_service_call
-from .temporal_integration import TEMPORAL_AVAILABLE, TemporalBeekeeperClient, TemporalConfig
 from .tracing import Tracer
 from .worker import WorkerContext, WorkerRuntime, execute_task_serialized, make_worker_identity
 from .worker_registry import WorkerRegistry
@@ -75,7 +73,6 @@ from .policy_service import PolicyService
 from .dispatch_service import DispatchConfig, DispatchService
 from .execution_mode_service import ExecutionModeService
 from .worker_forge_service import WorkerForgeService
-from .user_policy import UserPolicy
 from .queen_updates import write_queen_update
 from .queen_actions import ActionContext, QueenActionLoop, build_default_action_registry
 from .tool_adapters import register_action_tools, register_worker_tools
@@ -85,7 +82,6 @@ from .runtime_env import resolve_llm_providers, resolve_searxng_base_url
 from .governance import (
     CapabilityManifestRegistry,
     build_policy_adapter,
-    adapter_decision_to_policy,
     build_manifest_from_skill_rule,
 )
 from .governance.tool_broker import LocalToolBroker

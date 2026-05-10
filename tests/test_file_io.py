@@ -2,7 +2,6 @@
 ForgedWorker read_file, and FileWorker open→read alias."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,7 +13,6 @@ from beekeeper.contracts import (
     SkillProfile,
     SoulProfile,
     TaskEnvelope,
-    TrustTier,
 )
 from beekeeper.queen import QueenAgent, QueenConfig
 from beekeeper.worker import FileWorker, ForgedWorker, WorkerContext

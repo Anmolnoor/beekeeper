@@ -6,17 +6,14 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
-from beekeeper.contracts import QueenActionRequest, QueenActionResult
+from beekeeper.contracts import QueenActionRequest
 from beekeeper.honeycomb import HoneycombConfig, HoneycombStore
 from beekeeper.queen import QueenAgent, QueenConfig
 from beekeeper.queen_actions import (
     ActionContext,
-    QueenActionLoop,
     QueenActionRegistry,
     _action_remember,
-    _action_spawn_worker,
     build_default_action_registry,
 )
 from beekeeper.user_memory import extract_and_save_queen_memories

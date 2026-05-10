@@ -1,8 +1,7 @@
 """Tests for model-driven tool runtime: ToolRegistry, ToolExecutor, ToolLoopEngine and tool-call guardrails."""
 
-import pytest
 
-from beekeeper.contracts import RuleProfile, ToolCall, ToolExecutionPolicy, ToolResult, ToolSpec, TrustTier
+from beekeeper.contracts import RuleProfile, ToolCall, ToolExecutionPolicy, ToolResult, ToolSpec
 from beekeeper.guardrails import evaluate_tool_call
 from beekeeper.tool_runtime import ToolExecutor, ToolLoopEngine, ToolRegistry
 

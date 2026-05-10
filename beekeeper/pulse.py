@@ -6,11 +6,10 @@ executes commands on schedule.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -54,7 +53,6 @@ def _job_is_due(job: dict[str, Any], now: datetime) -> bool:
     """Check if job is due to run at or before now."""
     sched = job.get("schedule") or {}
     kind = sched.get("kind", "cron")
-    tz = timezone.utc
     if kind == "at":
         at_str = sched.get("at")
         if not at_str:

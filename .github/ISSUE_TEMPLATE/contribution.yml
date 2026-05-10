@@ -1,0 +1,64 @@
+name: Contribution Proposal
+description: Propose a change or feature (required for new contributors before submitting a PR)
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/Anmolnoor/beekeeper/blob/main/CONTRIBUTING.md).
+
+        New issues from new contributors are auto-closed by default. Maintainers review auto-closed issues and reopen the ones that meet the quality bar. **Only contributors approved with `lgtm` can open PRs** — open this proposal first.
+
+        Keep this short. If it doesn't fit on one screen, it's too long. Write in your own voice.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What do you want to change?
+      description: Be specific and concise. One screen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why?
+      description: What problem does this solve? Who benefits?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where does this live?
+      description: Which surface of Beekeeper is affected?
+      options:
+        - Core (Queen / Worker / Honeycomb / guardrails)
+        - New worker kind
+        - New LLM provider
+        - New MCP integration
+        - CLI
+        - API (Beekeeper API or Queen API)
+        - Docs / examples
+        - Tooling / CI
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: how
+    attributes:
+      label: How? (optional)
+      description: Brief technical approach if you have one in mind. Reference existing modules/files.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: implement
+    attributes:
+      label: Are you willing to implement this yourself?
+      options:
+        - "Yes, if approved"
+        - "No, requesting maintainer to implement"
+    validations:
+      required: true

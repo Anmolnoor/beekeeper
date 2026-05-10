@@ -1,4 +1,4 @@
-"""Programmatic Python SDK for Beehive.
+"""Programmatic Python SDK for Beekeeper.
 
 Use BeekeeperClient to run Queen requests, chat, doctor checks, and more from Python.
 
@@ -11,7 +11,6 @@ Example:
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -28,7 +27,7 @@ from .runner import (
 
 
 class BeekeeperClient:
-    """Programmatic API for Beehive Queen and runtime operations."""
+    """Programmatic API for Beekeeper Queen and runtime operations."""
 
     def __init__(
         self,

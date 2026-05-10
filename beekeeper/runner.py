@@ -85,7 +85,7 @@ from .audit_compliance import (
     reconcile_audit_trace_links,
     verify_integrity,
 )
-from .package_installer import install_package, list_installed_plugins, uninstall_plugin
+from .package_installer import install_package, list_installed_plugins
 from .worker_registry import WorkerRegistry
 from .trace_compaction import compact_traces
 from .pulse import PulseConfig, run_pulse_loop
@@ -324,7 +324,7 @@ def _run_chat_loop(args: argparse.Namespace) -> int:
                 for ev in spawn_events:
                     wk = ev.get("worker_kind", "custom")
                     print(f"\n  ⚡ New task type detected — building a custom worker ({wk}) in the background.")
-                    print(f"     This request was handled immediately. Future requests of this type will be faster.")
+                    print("     This request was handled immediately. Future requests of this type will be faster.")
                     _pending_spawns.add(wk)
             except Exception:
                 pass
@@ -782,7 +782,7 @@ def _ensure_env_file(project_root: Path, non_interactive: bool) -> bool:
 
 def _run_quickstart(non_interactive: bool = False) -> int:
     """Short 5-minute path: .env, doctor, init-tenant with defaults."""
-    print("Beehive Quickstart")
+    print("Beekeeper Quickstart")
     print("=" * 40)
     project_root = _project_root()
     _ensure_env_file(project_root, non_interactive=True)
@@ -820,7 +820,7 @@ def _run_quickstart(non_interactive: bool = False) -> int:
 
 def _run_setup_wizard(non_interactive: bool = False) -> int:
     """Interactive first-time setup: .env copy, doctor, init-tenant, LLM provider, optional channels, admin."""
-    print("Beehive Setup Wizard")
+    print("Beekeeper Setup Wizard")
     print("=" * 40)
     project_root = _project_root()
     _ensure_env_file(project_root, non_interactive)
@@ -905,7 +905,7 @@ def _run_setup_wizard(non_interactive: bool = False) -> int:
 
 def _run_onboard_wizard(non_interactive: bool = False) -> int:
     """Onboard a Queen into an existing hive (or create org/hive if none exist)."""
-    print("Beehive Onboard")
+    print("Beekeeper Onboard")
     print("=" * 40)
     store = _get_beekeeper_store()
     orgs = store.list_orgs()
@@ -938,7 +938,7 @@ def _run_onboard_wizard(non_interactive: bool = False) -> int:
             print("Select hive:")
             for i, h in enumerate(hives, 1):
                 print(f"  {i}. {h.name} ({h.hive_id})")
-            hidx = input(f"Number [1]: ").strip() or "1"
+            hidx = input("Number [1]: ").strip() or "1"
             try:
                 hive = hives[int(hidx) - 1]
             except (ValueError, IndexError):
@@ -954,7 +954,7 @@ def _run_onboard_wizard(non_interactive: bool = False) -> int:
 
 def _run_shell(honeycomb_root: str = ".honeycomb") -> int:
     """Interactive shell with command discovery."""
-    print("Beehive Shell")
+    print("Beekeeper Shell")
     print("=" * 40)
     print("Type a command or 'help' for options. 'exit' to quit.")
     print()
@@ -1017,7 +1017,7 @@ def _run_commands_list() -> None:
 
 
 def _print_command_guide() -> None:
-    print("\nBeehive command guide:")
+    print("\nBeekeeper command guide:")
     print(textwrap.dedent("""\
       - beekeeper
           Checks runtime health and auto-starts required Docker services if needed.
@@ -1034,7 +1034,7 @@ def _print_command_guide() -> None:
       - beekeeper metrics [--webhook-url URL]
           Prints honeycomb telemetry metrics and emits alert webhook if requested.
       - beekeeper down
-          Stops Beehive containers from docker-compose.
+          Stops Beekeeper containers from docker-compose.
       - beekeeper restart
           Restarts all containers (core, workers, beekeeper-api).
       - beekeeper reload
@@ -1044,7 +1044,7 @@ def _print_command_guide() -> None:
       - beekeeper reset [--core] [--api] [--all]
           Same as rebuild.
       - beekeeper ps
-          Shows Beehive container status.
+          Shows Beekeeper container status.
       - beekeeper run --scheduler <auto|inline|celery|temporal> --vector <memory|qdrant> --query "<text>"
           Runs one Queen request through the selected scheduler/vector backend.
       - beekeeper chat --scheduler <auto|inline|celery|temporal> --vector <memory|qdrant>
@@ -1603,7 +1603,7 @@ def _print_status_screen(data: dict[str, Any], now_str: str) -> None:
     print(f"Beekeeper Status  [{now_str}]  (q to quit)")
     print("─" * 54)
 
-    print(f"\nQueen")
+    print("\nQueen")
     print(f"  Uptime:   {data.get('uptime', 'unknown')}")
 
     workers: list[dict[str, Any]] = data.get("workers", [])
@@ -1618,7 +1618,7 @@ def _print_status_screen(data: dict[str, Any], now_str: str) -> None:
         print(f"  ... and {len(workers) - 8} more")
 
     containers: list[dict[str, Any]] = data.get("containers", [])
-    print(f"\nContainers")
+    print("\nContainers")
     if containers:
         col = 0
         for c in containers:
@@ -1634,7 +1634,7 @@ def _print_status_screen(data: dict[str, Any], now_str: str) -> None:
     else:
         print("  (no container info — is Docker running?)")
 
-    print(f"\nStorage")
+    print("\nStorage")
     print(
         f"  Honeycomb:  {data.get('storage_mb', 0):.1f} MB   "
         f"Traces: {data.get('traces', 0)}   "
@@ -1773,11 +1773,11 @@ def main() -> None:
 
     subparsers.add_parser("down", help="Stop docker compose services")
     subparsers.add_parser("ps", help="Show docker compose service status")
-    restart_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "restart",
         help="Restart all docker compose services (core, workers, beekeeper-api, queen-api, open-webui).",
     )
-    reload_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "reload",
         help="Reload beekeeper: restart beekeeper-api and queen-api (picks up config changes). Use 'restart' for full reset.",
     )
@@ -1872,7 +1872,7 @@ def main() -> None:
     sessions_parser.add_argument("--honeycomb-root", default=".honeycomb")
     sessions_sub = sessions_parser.add_subparsers(dest="sessions_command", required=True)
     sessions_sub.add_parser("list", help="List sessions")
-    sessions_create = sessions_sub.add_parser("create", help="Create a new session")
+    sessions_sub.add_parser("create", help="Create a new session")
     sessions_traces = sessions_sub.add_parser("traces", help="List traces in a session")
     sessions_traces.add_argument("session_id", help="Session ID")
     sessions_tree = sessions_sub.add_parser("tree", help="Show trace tree (branching)")

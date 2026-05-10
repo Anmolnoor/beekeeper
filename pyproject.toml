@@ -8,6 +8,20 @@ version = "0.1.0"
 description = "Beekeeper-style multi-agent runtime with queen orchestration and ephemeral workers."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Anmol Noor" }]
+keywords = ["agents", "agent-framework", "llm", "multi-agent", "governance", "policy", "mcp"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
   "python-dotenv>=1.0.0",
   "pydantic>=2.7.0",
@@ -29,6 +43,11 @@ dependencies = [
   "rich>=13.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Anmolnoor/beekeeper"
+Repository = "https://github.com/Anmolnoor/beekeeper"
+Issues = "https://github.com/Anmolnoor/beekeeper/issues"
+
 [project.scripts]
 beekeeper = "beekeeper.cli.main:main"
 beekeeper-api = "beekeeper_api.app:main"
@@ -44,3 +63,14 @@ packages = ["beekeeper", "beekeeper.config", "beekeeper.data_plane", "beekeeper.
 
 [tool.setuptools.package-data]
 beekeeper = ["souls/*.json", "souls/*.md"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+# E402: imports interleaved with optional-dep try/except blocks are intentional
+# E501: line length is enforced via formatter, not lint
+ignore = ["E402", "E501"]
+

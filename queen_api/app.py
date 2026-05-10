@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 

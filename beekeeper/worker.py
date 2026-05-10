@@ -142,7 +142,7 @@ class BaseSpecialistWorker:
 class WebSearchWorker(BaseSpecialistWorker):
     worker_kind = WorkerKind.web_search
     output_model = WebSearchOutput
-    
+
     def __init__(
         self,
         llm_provider: str = "ollama",

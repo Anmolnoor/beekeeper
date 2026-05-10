@@ -1,7 +1,6 @@
 """Tests for trace compaction."""
 from pathlib import Path
 
-import pytest
 
 from beekeeper.trace_compaction import (
     _compact_events,

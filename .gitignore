@@ -33,6 +33,8 @@ ENV/
 
 # Local data/runtime artifacts
 .honeycomb/
+.beekeeper_store/
+.queen_core/
 *.log
 runtime/docker-data/
 

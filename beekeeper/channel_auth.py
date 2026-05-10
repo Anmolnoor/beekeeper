@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import os
 from base64 import urlsafe_b64encode
-from typing import Any
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes

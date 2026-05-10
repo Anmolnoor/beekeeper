@@ -1,0 +1,89 @@
+name: Bug Report
+description: Report something that's broken in Beekeeper
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/Anmolnoor/beekeeper/blob/main/CONTRIBUTING.md).
+
+        New issues from new contributors are auto-closed by default. Maintainers review auto-closed issues and reopen the ones that meet the quality bar. Issues that don't meet the bar will not be reopened or receive a reply.
+
+        Keep this short. If it doesn't fit on one screen, it's too long. Write in your own voice.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Be specific. Paste the exact error message if any. Don't paraphrase.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Minimal steps to trigger the bug. Include the exact `beekeeper` command or API call.
+      placeholder: |
+        1. `beekeeper run --query "..."`
+        2. ...
+        3. error appears
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Beekeeper is affected?
+      options:
+        - Queen / orchestration
+        - Worker (web_search, heavy_compute, audit)
+        - Forged / worker forge
+        - Honeycomb / tracing
+        - Tool registry / guardrails
+        - MCP adapter
+        - LLM provider (Ollama / Gemini / OpenAI)
+        - CLI (beekeeper / beekeeper chat / beekeeper run)
+        - Beekeeper API (port 8787)
+        - Queen API (port 8788)
+        - Docker compose stack
+        - Other / unsure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: e.g. `0.1.0`, or the short commit SHA you reproduced against.
+    validations:
+      required: false
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`
+      placeholder: 3.11.x
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / honeycomb events
+      description: |
+        Paste only the relevant lines. Wrap with triple backticks. Strip secrets.
+      render: shell
+    validations:
+      required: false

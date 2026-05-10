@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .honeycomb import HoneycombConfig, HoneycombStore, utcnow_iso
+from .honeycomb import HoneycombStore
 
 
 class QueenUpdate(BaseModel):

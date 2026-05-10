@@ -16,15 +16,11 @@ Workflow
 """
 from __future__ import annotations
 
-import json
-import os
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .contracts import (
     AgentBlueprint,
-    AbilitiesProfile,
     HumanReviewRecord,
     ProfileBundleRef,
     QueenActionRequest,
@@ -128,7 +124,7 @@ def _action_remember(req: QueenActionRequest, ctx: ActionContext) -> QueenAction
 
 def _action_web_search(req: QueenActionRequest, ctx: ActionContext) -> QueenActionResult:
     """Run a web search via SearXNG + LLM synthesis."""
-    from .contracts import Status, TaskEnvelope, WorkerKind
+    from .contracts import TaskEnvelope, WorkerKind
     from .worker import WorkerContext, make_worker_identity
 
     query = str(req.parameters.get("query", "")).strip()
@@ -161,7 +157,6 @@ def _action_web_search(req: QueenActionRequest, ctx: ActionContext) -> QueenActi
         )
         # Build a lightweight worker context
         skill = ctx.registry.get_skill("skill.research.web")
-        from .registry import SkillRuleSoulRegistry
         resolved = ctx.registry.resolve_profiles("blueprint.queen.default")
         wc = WorkerContext(
             identity=make_worker_identity(
@@ -282,7 +277,7 @@ def _action_spawn_worker(req: QueenActionRequest, ctx: ActionContext) -> QueenAc
 def _action_run_task(req: QueenActionRequest, ctx: ActionContext) -> QueenActionResult:
     """Dispatch a task to a specific worker kind through the worker pipeline."""
     from uuid import uuid4
-    from .contracts import Status, TaskEnvelope
+    from .contracts import TaskEnvelope
     from .worker import WorkerContext, make_worker_identity
 
     intent = str(req.parameters.get("intent", "research_topic")).strip()
@@ -328,9 +323,8 @@ def _action_run_task(req: QueenActionRequest, ctx: ActionContext) -> QueenAction
         except KeyError:
             resolved = ctx.registry.resolve_profiles("blueprint.worker.web")
 
-        skill_id = resolved.soul.soul_profile_id.replace("soul.", "skill.")
         try:
-            skill = ctx.registry.get_skill(f"skill.research.web")
+            skill = ctx.registry.get_skill("skill.research.web")
         except KeyError:
             skill = ctx.registry.get_skill("skill.research.web")
 
