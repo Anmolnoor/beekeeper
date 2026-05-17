@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Beekeeper Setup</title>
+  <style>
+    :root { --bg: #0f0f12; --card: #1a1a1f; --border: #2a2a32; --text: #e8e8ed; --muted: #888; --accent: #7c6ef6; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1.5rem; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .sub { font-size: 0.875rem; color: var(--muted); margin-bottom: 1.5rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; max-width: 480px; }
+    label { display: block; font-size: 0.875rem; margin-bottom: 0.25rem; color: var(--muted); }
+    input, select { width: 100%; padding: 0.6rem; margin-bottom: 1rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+    input::placeholder { color: var(--muted); }
+    .row { display: flex; gap: 1rem; }
+    .row > * { flex: 1; }
+    button { padding: 0.6rem 1.2rem; background: var(--accent); border: none; border-radius: 6px; color: white; font-weight: 500; cursor: pointer; }
+    button:hover { opacity: 0.9; }
+    button.secondary { background: var(--border); }
+    .error { color: #f87171; font-size: 0.875rem; margin-bottom: 0.5rem; }
+    .success { color: #4ade80; font-size: 0.875rem; margin-bottom: 0.5rem; }
+    .step { display: none; }
+    .step.active { display: block; }
+    #setup-form input, #setup-form select { user-select: text; -webkit-user-select: text; pointer-events: auto; }
+    .nav { margin-top: 1.5rem; display: flex; gap: 0.5rem; }
+    .optional { font-size: 0.75rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Beekeeper First-Run Setup</h1>
+    <p class="sub">Configure your agent platform. This runs once.</p>
+    <div id="error" class="error"></div>
+    <div id="success" class="success"></div>
+
+    <form id="setup-form">
+      <div class="step active" id="step-llm">
+        <h2 style="font-size:1rem;margin-bottom:0.75rem">1. LLM Provider</h2>
+        <label for="llm_provider">Provider</label>
+        <select id="llm_provider" name="llm_provider" autocomplete="off">
+          <option value="openai">OpenAI</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="ollama">Ollama (local)</option>
+        </select>
+        <div id="ollama-fields">
+          <label for="ollama_base_url">Ollama Base URL</label>
+          <input id="ollama_base_url" type="text" name="ollama_base_url" value="http://localhost:11434" placeholder="http://localhost:11434" autocomplete="off">
+          <label for="ollama_model">Ollama Model</label>
+          <input id="ollama_model" type="text" name="ollama_model" value="catsarethebest/qwen2.5-N2:1.5b" placeholder="Model name" autocomplete="off">
+        </div>
+        <div id="gemini-fields" style="display:none">
+          <label for="gemini_api_key">Gemini API Key</label>
+          <input id="gemini_api_key" type="password" name="gemini_api_key" placeholder="Optional" autocomplete="new-password">
+        </div>
+        <div id="openai-fields" style="display:none">
+          <label for="openai_api_key">OpenAI API Key</label>
+          <input id="openai_api_key" type="password" name="openai_api_key" placeholder="Optional" autocomplete="new-password">
+        </div>
+      </div>
+
+      <div class="step" id="step-channels">
+        <h2 style="font-size:1rem;margin-bottom:0.75rem">2. Channels (optional)</h2>
+        <label for="telegram_bot_token">Telegram Bot Token <span class="optional">optional</span></label>
+        <input id="telegram_bot_token" type="password" name="telegram_bot_token" placeholder="Leave blank to skip" autocomplete="off">
+        <label for="whatsapp_access_token">WhatsApp Access Token <span class="optional">optional</span></label>
+        <input id="whatsapp_access_token" type="password" name="whatsapp_access_token" placeholder="Leave blank to skip" autocomplete="off">
+        <label for="whatsapp_phone_number_id">WhatsApp Phone Number ID <span class="optional">optional</span></label>
+        <input id="whatsapp_phone_number_id" type="text" name="whatsapp_phone_number_id" placeholder="Leave blank to skip" autocomplete="off">
+      </div>
+
+      <div class="step" id="step-admin">
+        <h2 style="font-size:1rem;margin-bottom:0.75rem">3. Admin Account</h2>
+        <label>Email</label>
+        <input type="email" name="admin_email" placeholder="admin@example.com" required>
+        <label>Password</label>
+        <input type="password" name="admin_password" placeholder="Min 8 characters" required minlength="8">
+      </div>
+
+      <div class="step" id="step-org">
+        <h2 style="font-size:1rem;margin-bottom:0.75rem">4. Organization</h2>
+        <label for="org_name">Organization Name</label>
+        <input id="org_name" type="text" name="org_name" value="Default Organization">
+        <label for="hive_name">Hive Name</label>
+        <input id="hive_name" type="text" name="hive_name" value="Main Hive">
+      </div>
+
+      <div class="nav">
+        <button type="button" class="secondary" id="btn-prev" style="display:none">Back</button>
+        <button type="button" id="btn-next">Next</button>
+        <button type="submit" id="btn-submit" style="display:none">Complete Setup</button>
+      </div>
+    </form>
+  </div>
+  <script>
+    const API = (() => {
+      const p = new URLSearchParams(window.location.search);
+      return (p.get('api') || p.get('api_base') || '').replace(/\/$/, '') || '';
+    })();
+    const steps = ['step-llm', 'step-channels', 'step-admin', 'step-org'];
+    let currentStep = 0;
+    function showStep(i) {
+      currentStep = i;
+      steps.forEach((id, j) => {
+        document.getElementById(id).classList.toggle('active', j === i);
+      });
+      document.getElementById('btn-prev').style.display = i > 0 ? 'inline-block' : 'none';
+      document.getElementById('btn-next').style.display = i < steps.length - 1 ? 'inline-block' : 'none';
+      document.getElementById('btn-submit').style.display = i === steps.length - 1 ? 'inline-block' : 'none';
+    }
+    function syncProviderFields() {
+      const v = document.getElementById('llm_provider').value;
+      document.getElementById('ollama-fields').style.display = v === 'ollama' ? 'block' : 'none';
+      document.getElementById('gemini-fields').style.display = v === 'gemini' ? 'block' : 'none';
+      document.getElementById('openai-fields').style.display = v === 'openai' ? 'block' : 'none';
+    }
+    document.getElementById('llm_provider').addEventListener('change', syncProviderFields);
+    syncProviderFields();
+    (async function loadConfig() {
+      const base = API || window.location.origin;
+      try {
+        const r = await fetch(base + '/api/setup/config');
+        if (r.ok) {
+          const cfg = await r.json();
+          const set = (id, val) => { const el = document.getElementById(id) || document.querySelector(`[name="${id}"]`); if (el && val != null && val !== '') el.value = val; };
+          set('llm_provider', cfg.llm_provider);
+          set('ollama_base_url', cfg.ollama_base_url);
+          set('ollama_model', cfg.ollama_model);
+          set('gemini_api_key', cfg.gemini_api_key);
+          set('openai_api_key', cfg.openai_api_key);
+          set('telegram_bot_token', cfg.telegram_bot_token);
+          set('whatsapp_access_token', cfg.whatsapp_access_token);
+          set('whatsapp_phone_number_id', cfg.whatsapp_phone_number_id);
+          set('org_name', cfg.org_name);
+          set('hive_name', cfg.hive_name);
+          syncProviderFields();
+        }
+      } catch (_) {}
+    })();
+    document.getElementById('btn-prev').onclick = () => showStep(currentStep - 1);
+    document.getElementById('btn-next').onclick = () => showStep(currentStep + 1);
+    document.getElementById('setup-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const data = {
+        llm_provider: form.llm_provider.value,
+        ollama_base_url: form.ollama_base_url?.value || 'http://localhost:11434',
+        ollama_model: form.ollama_model?.value || 'catsarethebest/qwen2.5-N2:1.5b',
+        gemini_api_key: form.gemini_api_key?.value || '',
+        openai_api_key: form.openai_api_key?.value || '',
+        telegram_bot_token: form.telegram_bot_token?.value || '',
+        whatsapp_access_token: form.whatsapp_access_token?.value || '',
+        whatsapp_phone_number_id: form.whatsapp_phone_number_id?.value || '',
+        admin_email: form.admin_email.value,
+        admin_password: form.admin_password.value,
+        org_name: form.org_name.value || 'Default Organization',
+        hive_name: form.hive_name.value || 'Main Hive',
+        create_linux_user: false,
+      };
+      document.getElementById('error').textContent = '';
+      document.getElementById('success').textContent = '';
+      const base = API || window.location.origin;
+      try {
+        const r = await fetch(base + '/api/setup/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        const res = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(res.detail || res.message || 'Setup failed');
+        document.getElementById('success').textContent = 'Setup complete! Redirecting to dashboard...';
+        if (res.access_token) {
+          localStorage.setItem('beekeeper_token', res.access_token);
+        }
+        setTimeout(() => { window.location.href = (base || window.location.origin) + '/dashboard'; }, 1500);
+      } catch (err) {
+        document.getElementById('error').textContent = err.message || String(err);
+      }
+    };
+  </script>
+</body>
+</html>

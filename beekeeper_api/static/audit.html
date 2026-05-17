@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audit Log - Beekeeper</title>
+  <style>
+    :root { --bg: #0f0f12; --card: #1a1a1f; --border: #2a2a32; --text: #e8e8ed; --muted: #888; --accent: #7c6ef6; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1.5rem; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem; }
+    .filters { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+    .filters select, .filters input { padding: 0.4rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.875rem; }
+    .filters label { font-size: 0.75rem; color: var(--muted); margin-right: 0.25rem; }
+    .audit-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    .audit-table th, .audit-table td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); }
+    .audit-table th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 0.7rem; }
+    .service-badge { display: inline-block; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; }
+    .service-queen { background: #7c6ef6; color: white; }
+    .service-redis { background: #dc2626; color: white; }
+    .service-qdrant { background: #059669; color: white; }
+    .service-ollama, .service-gemini, .service-openai { background: #2563eb; color: white; }
+    .service-searxng { background: #ea580c; color: white; }
+    .service-temporal { background: #7c3aed; color: white; }
+    .service-beekeeper_api, .service-queen_api { background: #0ea5e9; color: white; }
+    .service-default { background: var(--border); }
+    .outcome-badge { display: inline-block; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; }
+    .outcome-success { background: #166534; color: #dcfce7; }
+    .outcome-failure { background: #991b1b; color: #fee2e2; }
+    .outcome-default { background: var(--border); color: var(--text); }
+    .details { max-width: 380px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .back { font-size: 0.875rem; color: var(--muted); margin-bottom: 0.5rem; display: inline-block; }
+    .back:hover { color: var(--text); }
+    .refresh-btn { padding: 0.4rem 0.75rem; background: var(--accent); border: none; border-radius: 6px; color: white; font-size: 0.875rem; cursor: pointer; }
+    .refresh-btn:hover { opacity: 0.9; }
+  </style>
+</head>
+<body>
+  <a href="/dashboard" class="back">← Dashboard</a>
+  <div class="card">
+    <div class="header">
+      <h1>Audit Log</h1>
+      <button class="refresh-btn" onclick="loadLogs()">Refresh</button>
+    </div>
+    <div class="filters">
+      <span><label>Service</label><select id="filter-service">
+        <option value="">All</option>
+        <option value="queen">Queen</option>
+        <option value="redis">Redis</option>
+        <option value="qdrant">Qdrant</option>
+        <option value="ollama">Ollama</option>
+        <option value="gemini">Gemini</option>
+        <option value="openai">OpenAI</option>
+        <option value="searxng">SearXNG</option>
+        <option value="temporal">Temporal</option>
+        <option value="queen_api">Queen API</option>
+        <option value="beekeeper_api">Beekeeper API</option>
+      </select></span>
+      <span><label>Source</label><select id="filter-source">
+        <option value="">All</option>
+        <option value="queen_api">queen_api</option>
+        <option value="web_ui">web_ui</option>
+        <option value="cli">cli</option>
+        <option value="channel:slack">channel:slack</option>
+        <option value="channel:telegram">channel:telegram</option>
+        <option value="channel:discord">channel:discord</option>
+        <option value="channel:whatsapp">channel:whatsapp</option>
+        <option value="beekeeper_api:chat_run">beekeeper_api:chat_run</option>
+      </select></span>
+      <span><label>Action</label><select id="filter-action">
+        <option value="">All</option>
+        <option value="called">called</option>
+        <option value="submitted">submitted</option>
+        <option value="completed">completed</option>
+        <option value="failed">failed</option>
+      </select></span>
+      <span><label>Limit</label><select id="filter-limit">
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="200">200</option>
+        <option value="500">500</option>
+      </select></span>
+    </div>
+    <table class="audit-table">
+      <thead>
+        <tr><th>Time</th><th>Service</th><th>Action</th><th>Outcome</th><th>Source</th><th>User</th><th>Details</th><th>Trace</th></tr>
+      </thead>
+      <tbody id="audit-tbody">
+        <tr><td colspan="8" style="color:var(--muted)">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <script>
+    const API = (() => {
+      const params = new URLSearchParams(window.location.search);
+      const fromUrl = params.get('api') || params.get('api_base');
+      if (fromUrl) return fromUrl.replace(/\/$/, '');
+      if (typeof window !== 'undefined' && window.BEEKEEPER_API_URL) return window.BEEKEEPER_API_URL.replace(/\/$/, '');
+      return '';
+    })();
+    function token() { return localStorage.getItem('beekeeper_token'); }
+    function api(url, opts = {}) {
+      const h = { ...opts.headers };
+      if (token()) h['Authorization'] = 'Bearer ' + token();
+      return fetch(API + url, { ...opts, headers: h });
+    }
+    async function readErrorDetail(resp) {
+      let detail = '';
+      try {
+        const text = await resp.text();
+        if (!text) return '';
+        try {
+          const parsed = JSON.parse(text);
+          detail = parsed.detail || parsed.message || text;
+        } catch (_) {
+          detail = text;
+        }
+      } catch (_) {}
+      return String(detail || '').trim();
+    }
+    function serviceClass(s) {
+      if (!s) return 'service-default';
+      return 'service-' + String(s).toLowerCase().replace(/[^a-z0-9]/g, '_');
+    }
+    function outcomeClass(outcome) {
+      if (outcome === 'success') return 'outcome-success';
+      if (outcome === 'failure') return 'outcome-failure';
+      return 'outcome-default';
+    }
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+    function formatDetails(log) {
+      const parts = [];
+      if (log.resource) parts.push('resource: ' + String(log.resource));
+      if (log.duration_ms !== undefined && log.duration_ms !== null) parts.push('duration_ms: ' + String(log.duration_ms));
+      if (log.error) parts.push('error: ' + String(log.error));
+      if (log.extra && typeof log.extra === 'object') {
+        for (const [k, v] of Object.entries(log.extra)) {
+          if (v === null || v === undefined) continue;
+          if (typeof v === 'object') {
+            parts.push(k + ': ' + JSON.stringify(v));
+          } else {
+            parts.push(k + ': ' + String(v));
+          }
+        }
+      }
+      return parts.join(' | ');
+    }
+    async function loadLogs() {
+      const tbody = document.getElementById('audit-tbody');
+      const service = document.getElementById('filter-service').value;
+      const source = document.getElementById('filter-source').value;
+      const action = document.getElementById('filter-action').value;
+      const limit = document.getElementById('filter-limit').value;
+      let url = '/api/audit/logs?limit=' + limit;
+      if (service) url += '&service=' + encodeURIComponent(service);
+      if (source) url += '&source=' + encodeURIComponent(source);
+      if (action) url += '&action=' + encodeURIComponent(action);
+      try {
+        const r = await api(url);
+        if (r.status === 401) {
+          tbody.innerHTML = '<tr><td colspan="8">Please <a href="/dashboard">sign in</a> to view logs.</td></tr>';
+          return;
+        }
+        if (!r.ok) {
+          const detail = await readErrorDetail(r);
+          const msg = 'Failed to load logs (' + r.status + (detail ? ': ' + detail : '') + ')';
+          throw new Error(msg);
+        }
+        const data = await r.json();
+        const logs = data.logs || [];
+        if (logs.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">No logs yet.</td></tr>';
+        } else {
+          tbody.innerHTML = logs.map(l => {
+            const time = l.at ? new Date(l.at).toLocaleString() : '-';
+            const svc = l.service || '-';
+            const cls = serviceClass(svc);
+            const action = l.action || '-';
+            const outcome = l.outcome || '-';
+            const outcomeCls = outcomeClass(outcome);
+            const src = l.source || '-';
+            const user = l.user_id || '-';
+            const details = formatDetails(l) || '-';
+            const traceId = l.trace_id || '';
+            const traceLink = traceId
+              ? '<a href="/trace/' + encodeURIComponent(traceId) + '">' + escapeHtml(traceId.slice(0, 16)) + '…</a>'
+              : '-';
+            return '<tr><td>' + escapeHtml(time) + '</td><td><span class="service-badge ' + cls + '">' + escapeHtml(svc) + '</span></td><td>' + escapeHtml(action) + '</td><td><span class="outcome-badge ' + outcomeCls + '">' + escapeHtml(outcome) + '</span></td><td>' + escapeHtml(src) + '</td><td>' + escapeHtml(user) + '</td><td class="details" title="' + escapeHtml(details) + '">' + escapeHtml(details) + '</td><td>' + traceLink + '</td></tr>';
+          }).join('');
+        }
+      } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="8" style="color:#f87171">Failed to load: ' + escapeHtml(e.message || '') + '</td></tr>';
+      }
+    }
+    document.getElementById('filter-service').addEventListener('change', loadLogs);
+    document.getElementById('filter-source').addEventListener('change', loadLogs);
+    document.getElementById('filter-action').addEventListener('change', loadLogs);
+    document.getElementById('filter-limit').addEventListener('change', loadLogs);
+    loadLogs();
+  </script>
+</body>
+</html>

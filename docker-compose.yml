@@ -1,0 +1,239 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: beekeeper-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./runtime/docker-data/redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  temporal:
+    image: temporalio/admin-tools:latest
+    container_name: beekeeper-temporal
+    restart: on-failure
+    entrypoint:
+      - temporal
+      - server
+      - start-dev
+      - --namespace=default
+      - --ip=0.0.0.0
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+    volumes:
+      - ./runtime/docker-data/temporal:/var/lib/temporal
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: beekeeper-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./runtime/docker-data/qdrant:/qdrant/storage
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: beekeeper-searxng
+    ports:
+      - "8080:8080"
+    environment:
+      BASE_URL: http://localhost:8080/
+      INSTANCE_NAME: beekeeper-searxng
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "-", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beekeeper-celery-worker
+    command: ["celery", "-A", "beekeeper.celery_app.celery_app", "worker", "--loglevel=INFO"]
+    user: "10001:10001"
+    environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
+      BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
+      BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
+      BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
+      BEEKEEPER_VECTOR_BACKEND: qdrant
+      BEEKEEPER_VECTOR_COLLECTION: honeycomb_memory
+      BEEKEEPER_VECTOR_URL: http://qdrant:6333
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-openai,gemini,ollama}
+      BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-openai}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
+      BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
+      BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
+      BEEKEEPER_TEMPORAL_ENDPOINT: temporal:7233
+      BEEKEEPER_TEMPORAL_NAMESPACE: default
+      BEEKEEPER_TEMPORAL_TASK_QUEUE: beekeeper-queue
+    volumes:
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      searxng:
+        condition: service_started
+
+  temporal-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beekeeper-temporal-worker
+    command: ["python", "-m", "beekeeper.temporal_worker"]
+    restart: unless-stopped
+    environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
+      BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
+      BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
+      BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
+      BEEKEEPER_VECTOR_BACKEND: qdrant
+      BEEKEEPER_VECTOR_COLLECTION: honeycomb_memory
+      BEEKEEPER_VECTOR_URL: http://qdrant:6333
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-openai,gemini,ollama}
+      BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-openai}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
+      BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
+      BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
+      BEEKEEPER_TEMPORAL_ENDPOINT: temporal:7233
+      BEEKEEPER_TEMPORAL_NAMESPACE: default
+      BEEKEEPER_TEMPORAL_TASK_QUEUE: beekeeper-queue
+    volumes:
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
+    depends_on:
+      temporal:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      searxng:
+        condition: service_started
+
+  pulse:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beekeeper-pulse
+    command: ["python", "-m", "beekeeper.runner", "pulse", "--interval", "2", "--honeycomb-root", "/app/runtime/honeycomb"]
+    environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
+      BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-openai,gemini,ollama}
+      BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-openai}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
+      BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
+      BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
+    volumes:
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
+    depends_on:
+      redis:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+
+  queen-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beekeeper-queen-api
+    command: ["python", "-m", "queen_api.app"]
+    ports:
+      - "8788:8788"
+    environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
+      BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
+      BEEKEEPER_SCHEDULER_BACKEND: auto
+      BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
+      BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
+      BEEKEEPER_VECTOR_BACKEND: qdrant
+      BEEKEEPER_VECTOR_URL: http://qdrant:6333
+      BEEKEEPER_VECTOR_COLLECTION: honeycomb_memory
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-openai,gemini,ollama}
+      BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-openai}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
+      BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
+      BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
+    volumes:
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      temporal:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      searxng:
+        condition: service_started
+
+  beekeeper-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beekeeper-api
+    command: ["python", "-m", "beekeeper_api.app"]
+    ports:
+      - "8787:8787"
+    environment:
+      BEEKEEPER_RUNTIME_CONTEXT: docker
+      BEEKEEPER_PORT: "8787"
+      BEEKEEPER_HONEYCOMB_ROOT: /app/runtime/honeycomb
+      BEEKEEPER_STORE_ROOT: /app/runtime/store
+      BEEKEEPER_CELERY_BROKER_URL: redis://redis:6379/0
+      BEEKEEPER_CELERY_BACKEND_URL: redis://redis:6379/1
+      BEEKEEPER_VECTOR_BACKEND: qdrant
+      BEEKEEPER_VECTOR_URL: http://qdrant:6333
+      BEEKEEPER_VECTOR_COLLECTION: honeycomb_memory
+      BEEKEEPER_LLM_PROVIDERS: ${BEEKEEPER_LLM_PROVIDERS:-openai,gemini,ollama}
+      BEEKEEPER_LLM_PROVIDER: ${BEEKEEPER_LLM_PROVIDER:-openai}
+      BEEKEEPER_GEMINI_API_KEY: ${BEEKEEPER_GEMINI_API_KEY:-}
+      BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
+      BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
+      BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
+      BEEKEEPER_BASE_URL: http://localhost:8787
+    volumes:
+      - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
+      - ./runtime/docker-data/store:/app/runtime/store
+      # Uncomment to persist dashboard env edits to host .env (ensure .env exists first: cp .env.example .env)
+      # - ./.env:/app/.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      qdrant:
+        condition: service_started
+      searxng:
+        condition: service_started
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: beekeeper-open-webui
+    ports:
+      - "3000:8080"
+    environment:
+      OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
+      OPENAI_API_BASE_URL: http://queen-api:8788/v1
+    volumes:
+      - ./runtime/docker-data/open-webui:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - queen-api

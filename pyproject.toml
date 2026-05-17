@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beekeeper-agent-platform"
+version = "0.1.0"
+description = "Beekeeper-style multi-agent runtime with queen orchestration and ephemeral workers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [
+  { name = "Anmol Noor" },
+]
+classifiers = [
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+]
+dependencies = [
+  "python-dotenv>=1.0.0",
+  "pydantic>=2.7.0",
+  "eval_type_backport>=0.2.0",
+  "celery>=5.4.0",
+  "redis>=5.0.0",
+  "temporalio>=1.7.0",
+  "qdrant-client>=1.10.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "python-jose[cryptography]>=3.3.0",
+  "bcrypt>=4.0.0",
+  "slack-sdk>=3.27.0",
+  "cryptography>=42.0.0",
+  "PyNaCl>=1.5.0",
+  "croniter>=2.0.0",
+  "PyYAML>=6.0",
+  "mcp>=1.0.0",
+  "rich>=13.0.0",
+]
+
+[project.scripts]
+beekeeper = "beekeeper.cli.main:main"
+beekeeper-api = "beekeeper_api.app:main"
+queen-api = "queen_api.app:main"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+  "ignore:urllib3 v2 only supports OpenSSL::"
+]
+
+[tool.setuptools]
+packages = ["beekeeper", "beekeeper.config", "beekeeper.data_plane", "beekeeper.data_plane.repositories", "beekeeper.cli", "beekeeper.cli.commands", "beekeeper_api", "queen_api"]
+
+[tool.setuptools.package-data]
+beekeeper = ["souls/*.json", "souls/*.md"]
