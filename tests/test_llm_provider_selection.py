@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from beekeeper.llm_provider import GeminiProvider, OllamaProvider, build_llm_router
-from beekeeper.runner import _load_env_early
+from beekeeper.llm_provider import GeminiProvider, LLMRouter, OllamaProvider, build_llm_router
+from beekeeper.runtime_env import validate_llm_provider_env
+from beekeeper.runner import _check_http, _load_env_early
 
 
 def test_build_llm_router_prefers_explicit_llm_provider_over_env(monkeypatch) -> None:
@@ -34,6 +35,102 @@ def test_build_llm_router_respects_chain_order() -> None:
     assert len(router.providers) == 2
     assert isinstance(router.providers[0], OllamaProvider)
     assert isinstance(router.providers[1], GeminiProvider)
+
+
+def test_ollama_provider_adds_auth_and_normalizes_cloud_api_base(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return b'{"response":"ok"}'
+
+    def fake_urlopen(req: object, timeout: int) -> FakeResponse:
+        seen["url"] = req.full_url  # type: ignore[attr-defined]
+        seen["auth"] = req.get_header("Authorization")  # type: ignore[attr-defined]
+        seen["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("beekeeper.llm_provider.urllib.request.urlopen", fake_urlopen)
+
+    provider = OllamaProvider(
+        base_url="https://ollama.com/api",
+        model="gpt-oss:20b",
+        api_key="cloud-key",
+    )
+
+    response = provider.chat("hello")
+
+    assert response is not None
+    assert response.text == "ok"
+    assert seen == {
+        "url": "https://ollama.com/api/generate",
+        "auth": "Bearer cloud-key",
+        "timeout": 120,
+    }
+
+
+def test_ollama_router_from_env_reads_official_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("BEEKEEPER_LLM_PROVIDERS", "ollama")
+    monkeypatch.setenv("BEEKEEPER_OLLAMA_BASE_URL", "https://ollama.com/api")
+    monkeypatch.setenv("OLLAMA_API_KEY", "cloud-key")
+
+    router = LLMRouter.from_env()
+
+    assert router.providers
+    assert isinstance(router.providers[0], OllamaProvider)
+    assert router.providers[0].base_url == "https://ollama.com"
+    assert router.providers[0].api_key == "cloud-key"
+
+
+def test_ollama_cloud_provider_requires_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("BEEKEEPER_LLM_PROVIDERS", "ollama")
+    monkeypatch.setenv("BEEKEEPER_OLLAMA_BASE_URL", "https://ollama.com/api")
+    monkeypatch.delenv("BEEKEEPER_OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+
+    _, errors, _ = validate_llm_provider_env()
+
+    assert any("OLLAMA_API_KEY is required" in error for error in errors)
+
+
+def test_doctor_http_check_can_send_ollama_auth_header(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    def fake_urlopen(req: object, timeout: float) -> FakeResponse:
+        seen["url"] = req.full_url  # type: ignore[attr-defined]
+        seen["auth"] = req.get_header("Authorization")  # type: ignore[attr-defined]
+        seen["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("beekeeper.runner.urllib.request.urlopen", fake_urlopen)
+
+    check = _check_http(
+        "ollama",
+        "https://ollama.com/api/tags",
+        headers={"Authorization": "Bearer cloud-key"},
+    )
+
+    assert check.ok
+    assert seen == {
+        "url": "https://ollama.com/api/tags",
+        "auth": "Bearer cloud-key",
+        "timeout": 3.0,
+    }
 
 
 def test_load_env_early_does_not_override_explicit_env(monkeypatch, tmp_path: Path) -> None:

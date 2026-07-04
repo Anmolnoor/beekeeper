@@ -99,6 +99,10 @@
       <main id="dashboard-main">
       <div class="grid">
         <div class="card section" data-section="overview">
+          <h2>Personal Mode</h2>
+          <div id="personal-status">Loading…</div>
+        </div>
+        <div class="card section" data-section="overview">
           <h2>Channels</h2>
           <div id="channels-list">Loading…</div>
         </div>
@@ -514,7 +518,8 @@
     });
     document.getElementById('env-llm_provider')?.addEventListener('change', syncEnvProviderFields);
     async function loadCards() {
-      const [chRes, tplRes, orgRes, healthRes, approvalsRes, hivesRes, combsRes, queensRes, chatsRes, workersRes, analyticsRes, tracesRes, updatesRes, catalogRes, templatesRes, effectiveRes, opsOverviewRes, kpiRes, staffingRes, contractsRes, usabilityRes] = await Promise.all([
+      const [personalRes, chRes, tplRes, orgRes, healthRes, approvalsRes, hivesRes, combsRes, queensRes, chatsRes, workersRes, analyticsRes, tracesRes, updatesRes, catalogRes, templatesRes, effectiveRes, opsOverviewRes, kpiRes, staffingRes, contractsRes, usabilityRes] = await Promise.all([
+        api('/api/personal/status'),
         api('/api/channels'),
         api('/api/templates'),
         api('/api/orgs'),
@@ -537,6 +542,20 @@
         api('/api/roadmap/contracts'),
         api('/api/roadmap/usability')
       ]);
+      const personal = personalRes.ok ? await personalRes.json() : {};
+      const codingWorker = ((personal.workers || {}).coding_worker || {});
+      const personalProvider = personal.provider || {};
+      const personalQueen = personal.queen || {};
+      document.getElementById('personal-status').innerHTML = personalRes.ok
+        ? [
+            `<div class="kv"><span>Status</span><strong>${escapeHtml(personal.overall || 'unknown')}</strong></div>`,
+            `<div class="kv"><span>Provider</span><strong>${escapeHtml(personalProvider.name || 'unconfigured')}</strong></div>`,
+            `<div class="kv"><span>Model</span><strong>${escapeHtml(personalProvider.model || 'unconfigured')}</strong></div>`,
+            `<div class="kv"><span>Queen</span><strong>${escapeHtml(personalQueen.queen_name || 'not set')}</strong></div>`,
+            `<div class="kv"><span>coding_worker</span><span class="badge">${escapeHtml(codingWorker.label || 'planned/not connected')}</span></div>`,
+            `<div class="small">${escapeHtml(((personal.planned || {}).coding_worker || {}).detail || 'Coding worker is not connected yet.')}</div>`
+          ].join('')
+        : errHtml(personalRes, 'Personal status unavailable');
       document.getElementById('channels-list').innerHTML = chRes.ok
         ? ((await chRes.json()).channels || []).map(c => `<div class="row"><span>${c.channel || '-'}</span><span class="badge">configured</span></div>`).join('') || '<div class="row">No channels</div>'
         : errHtml(chRes, 'Channels unavailable');

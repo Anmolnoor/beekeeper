@@ -36,6 +36,7 @@ from beekeeper.tenancy_context import TenancyContext, resolve_tenancy_context
 from beekeeper.quotas import TenantQuotaManager
 from beekeeper.rate_limits import TenantRateLimiter
 from beekeeper.channel_capabilities import CHANNEL_CAPABILITY_MATRIX
+from beekeeper.personal_mode import build_personal_status
 
 from .auth import create_access_token, get_current_user, hash_password, verify_password
 from .deps import get_honeycomb, get_store, get_worker_registry
@@ -849,6 +850,12 @@ def list_approvals(
         "pending_count": len(pending),
         "approvals": [r.model_dump(mode="json") for r in pending],
     }
+
+
+@router.get("/api/personal/status")
+def personal_status(honeycomb_root: str | None = None) -> dict[str, Any]:
+    """Return V1 local personal-mode readiness without requiring platform services."""
+    return build_personal_status(store=get_store(), honeycomb_root=Path(honeycomb_root) if honeycomb_root else None)
 
 
 @router.get("/api/approvals/{review_id}")

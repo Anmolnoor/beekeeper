@@ -9,6 +9,7 @@ Step-by-step guide for first-time installation, setup, and usage. Follow these s
 - **Python 3.9+** — for CLI and local runs
 - **Docker & Docker Compose** — for full stack (Redis, Temporal, Qdrant, SearXNG, workers, Open WebUI)
 - **Optional:** Ollama (local LLM) running at `http://localhost:11434` for local model inference
+- **Optional:** Ollama Cloud API key for direct cloud inference at `https://ollama.com/api`
 
 ---
 
@@ -42,8 +43,9 @@ Edit `.env` and set:
 | Variable | Description |
 |----------|-------------|
 | `BEEKEEPER_LLM_PROVIDER` | `ollama`, `gemini`, or `openai` |
-| `BEEKEEPER_OLLAMA_BASE_URL` | For Ollama: default `http://localhost:11434` |
-| `BEEKEEPER_OLLAMA_MODEL` | Model name (e.g. `catsarethebest/qwen2.5-N2:1.5b`) |
+| `BEEKEEPER_OLLAMA_BASE_URL` | For local Ollama: `http://localhost:11434`; for Ollama Cloud: `https://ollama.com/api` |
+| `BEEKEEPER_OLLAMA_MODEL` | Model name (e.g. `gpt-oss:20b` for direct Ollama Cloud) |
+| `OLLAMA_API_KEY` | Required when using direct Ollama Cloud |
 | `BEEKEEPER_GEMINI_API_KEY` | Required if using Gemini |
 | `BEEKEEPER_OPENAI_API_KEY` | Required if using OpenAI |
 

@@ -75,6 +75,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
       BEEKEEPER_TEMPORAL_ENDPOINT: temporal:7233
       BEEKEEPER_TEMPORAL_NAMESPACE: default
@@ -110,6 +111,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
       BEEKEEPER_TEMPORAL_ENDPOINT: temporal:7233
       BEEKEEPER_TEMPORAL_NAMESPACE: default
@@ -139,6 +141,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
     volumes:
       - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
@@ -171,6 +174,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
     volumes:
       - ./runtime/docker-data/honeycomb:/app/runtime/honeycomb
@@ -208,6 +212,7 @@ services:
       BEEKEEPER_GEMINI_MODEL: ${BEEKEEPER_GEMINI_MODEL:-gemini-1.5-flash}
       BEEKEEPER_OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
       BEEKEEPER_OLLAMA_MODEL: ${BEEKEEPER_OLLAMA_MODEL:-catsarethebest/qwen2.5-N2:1.5b}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       BEEKEEPER_SEARXNG_BASE_URL_DOCKER: ${BEEKEEPER_SEARXNG_BASE_URL_DOCKER:-http://searxng:8080}
       BEEKEEPER_BASE_URL: http://localhost:8787
     volumes:
@@ -230,6 +235,7 @@ services:
       - "3000:8080"
     environment:
       OLLAMA_BASE_URL: ${BEEKEEPER_OLLAMA_BASE_URL:-http://localhost:11434}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       OPENAI_API_BASE_URL: http://queen-api:8788/v1
     volumes:
       - ./runtime/docker-data/open-webui:/app/backend/data

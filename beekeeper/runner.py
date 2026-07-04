@@ -83,7 +83,18 @@ from .worker_registry import WorkerRegistry
 from .trace_compaction import compact_traces
 from .pulse import PulseConfig, run_pulse_loop
 from .queen import QueenAgent, QueenConfig
-from .runtime_env import resolve_searxng_base_url, validate_llm_provider_env
+from .runtime_env import (
+    normalize_ollama_base_url,
+    resolve_ollama_api_key,
+    resolve_searxng_base_url,
+    validate_llm_provider_env,
+)
+from .personal_mode import (
+    build_personal_status,
+    format_personal_status,
+    personal_status_json,
+    run_personal_setup,
+)
 from .store import BeekeeperStore
 
 
@@ -488,14 +499,18 @@ def _check_http(
     url: str,
     timeout: float = 3.0,
     tolerated_error_codes: tuple[int, ...] = (),
+    headers: dict[str, str] | None = None,
 ) -> DoctorCheck:
+    request_headers = {
+        "User-Agent": "beekeeper-doctor/1.0",
+        "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+    }
+    if headers:
+        request_headers.update(headers)
     req = urllib.request.Request(
         url=url,
         method="GET",
-        headers={
-            "User-Agent": "beekeeper-doctor/1.0",
-            "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
-        },
+        headers=request_headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -617,7 +632,13 @@ def _collect_doctor_checks() -> list[DoctorCheck]:
     broker_url = os.getenv("BEEKEEPER_CELERY_BROKER_URL", "redis://localhost:6379/0")
     temporal_endpoint = os.getenv("BEEKEEPER_TEMPORAL_ENDPOINT", "localhost:7233")
     vector_url = os.getenv("BEEKEEPER_VECTOR_URL", "http://localhost:6333")
-    ollama_url = os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_url = normalize_ollama_base_url(
+        os.getenv("BEEKEEPER_OLLAMA_BASE_URL", "http://localhost:11434")
+    )
+    ollama_api_key = resolve_ollama_api_key()
+    ollama_headers = (
+        {"Authorization": f"Bearer {ollama_api_key}"} if ollama_api_key else None
+    )
     searxng_url = resolve_searxng_base_url(runtime_context="local")
 
     redis_host, redis_port = _parse_host_port_from_url(broker_url, default_port=6379)
@@ -632,7 +653,7 @@ def _collect_doctor_checks() -> list[DoctorCheck]:
         _check_tcp("redis", redis_host, redis_port),
         _check_tcp("temporal", temporal_host, temporal_port),
         _check_http("qdrant", vector_url.rstrip("/") + "/readyz"),
-        _check_http("ollama", ollama_url.rstrip("/") + "/api/tags"),
+        _check_http("ollama", ollama_url.rstrip("/") + "/api/tags", headers=ollama_headers),
         _check_http("searxng", searxng_url.rstrip("/") + "/", tolerated_error_codes=(403,)),
         _check_llm_provider_env(),
         _check_audit_signing_key(),
@@ -659,7 +680,14 @@ def _doctor_checks_to_json(checks: list[DoctorCheck]) -> dict[str, Any]:
     }
 
 
-def _run_doctor(auto_start: bool = False, json_output: bool = False) -> int:
+def _run_doctor(auto_start: bool = False, json_output: bool = False, personal: bool = False) -> int:
+    if personal:
+        status = build_personal_status(store=_get_beekeeper_store())
+        if json_output:
+            print(personal_status_json(status), end="")
+        else:
+            print(format_personal_status(status), end="")
+        return 0 if status.get("overall") == "ready" else 1
     checks = _collect_doctor_checks()
     failed = [check for check in checks if not check.ok]
 
@@ -893,6 +921,35 @@ def _run_setup_wizard(non_interactive: bool = False) -> int:
                 print("[WARN] beekeeper_api not installed. Skipping admin creation.")
 
     print("\nSetup complete. Run `beekeeper run --query \"your question\"` to try the Queen.")
+    return 0
+
+
+def _run_personal_setup(args: argparse.Namespace) -> int:
+    result = run_personal_setup(
+        store=_get_beekeeper_store(),
+        honeycomb_root=Path(getattr(args, "honeycomb_root", ".honeycomb")),
+        provider=getattr(args, "provider", None),
+        model=getattr(args, "model", None),
+        endpoint=getattr(args, "endpoint", None),
+        api_key_env=getattr(args, "api_key_env", None),
+    )
+    action = "created" if result.get("created") else "updated" if result.get("updated") else "loaded"
+    status = build_personal_status(store=_get_beekeeper_store())
+    print(f"Beekeeper Personal profile {action}.")
+    print(format_personal_status(status), end="")
+    return 0 if status.get("overall") == "ready" else 1
+
+
+def _run_personal_start(args: argparse.Namespace) -> int:
+    status = build_personal_status(store=_get_beekeeper_store())
+    print(format_personal_status(status), end="")
+    if status.get("overall") != "ready":
+        return 1
+    host = getattr(args, "host", "127.0.0.1")
+    port = int(getattr(args, "port", 8787))
+    print(f"Starting Beekeeper Personal dashboard at http://{host}:{port}/dashboard")
+    import uvicorn
+    uvicorn.run("beekeeper_api.app:app", host=host, port=port)
     return 0
 
 
@@ -1641,6 +1698,14 @@ def _run_status(args: argparse.Namespace) -> int:
     interval = getattr(args, "interval", 3.0)
     once = getattr(args, "once", False)
 
+    if getattr(args, "personal", False):
+        status = build_personal_status(store=_get_beekeeper_store(), honeycomb_root=honeycomb_root)
+        if getattr(args, "json", False):
+            print(personal_status_json(status), end="")
+        else:
+            print(format_personal_status(status), end="")
+        return 0 if status.get("overall") == "ready" else 1
+
     def render() -> None:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         data = _gather_status_data(honeycomb_root)
@@ -1748,6 +1813,7 @@ def main() -> None:
         dest="doctor_json",
         help="Output checks as JSON for scripting.",
     )
+    doctor_parser.add_argument("--personal", action="store_true", help="Run V1 personal-mode checks only.")
     smoke_parser = subparsers.add_parser("smoke-test", help="Run minimal end-to-end smoke validation")
     smoke_parser.add_argument("--honeycomb-root", default=".honeycomb")
     smoke_parser.add_argument("--json", action="store_true", help="Output machine-readable summary")
@@ -1792,6 +1858,12 @@ def main() -> None:
     reset_parser.add_argument("--all", action="store_true", help="Rebuild everything (default).")
     setup_parser = subparsers.add_parser("setup", help="First-time setup wizard (doctor, tenant, optional admin)")
     setup_parser.add_argument("--non-interactive", action="store_true", help="Use defaults, no prompts")
+    setup_parser.add_argument("--personal", action="store_true", help="Create or update a local personal-mode profile.")
+    setup_parser.add_argument("--honeycomb-root", default=".honeycomb", help="Local storage root for personal-mode memory and runs.")
+    setup_parser.add_argument("--provider", default=None, help="Personal-mode provider name, for example ollama, openai, gemini, or mock.")
+    setup_parser.add_argument("--model", default=None, help="Personal-mode provider model.")
+    setup_parser.add_argument("--endpoint", default=None, help="Personal-mode provider endpoint/base URL.")
+    setup_parser.add_argument("--api-key-env", default=None, help="Environment variable that contains the provider secret.")
     quickstart_parser = subparsers.add_parser("quickstart", help="5-minute quickstart (doctor, tenant, minimal prompts)")
     quickstart_parser.add_argument("--non-interactive", action="store_true", help="Use defaults, no prompts")
     onboard_parser = subparsers.add_parser("onboard", help="Onboard a Queen into an existing hive")
@@ -1905,6 +1977,9 @@ def main() -> None:
 
     start_parser = subparsers.add_parser("start", help="Start all Beekeeper services and print ready panel")
     start_parser.add_argument("--honeycomb-root", default=".honeycomb")
+    start_parser.add_argument("--personal", action="store_true", help="Start the local personal-mode dashboard without Docker orchestration.")
+    start_parser.add_argument("--host", default="127.0.0.1")
+    start_parser.add_argument("--port", type=int, default=8787)
 
     resetpass_parser = subparsers.add_parser(
         "reset-password",
@@ -1922,6 +1997,8 @@ def main() -> None:
     status_parser.add_argument("--honeycomb-root", default=".honeycomb")
     status_parser.add_argument("--interval", type=float, default=3.0, help="Refresh interval in seconds")
     status_parser.add_argument("--once", action="store_true", help="Print once and exit (no live refresh)")
+    status_parser.add_argument("--personal", action="store_true", help="Print V1 personal-mode status.")
+    status_parser.add_argument("--json", action="store_true", help="Output status as JSON.")
 
     args = parser.parse_args()
     try:
@@ -1947,7 +2024,7 @@ def main() -> None:
     if args.command == "chat":
         raise SystemExit(_run_chat_loop(args))
     if args.command == "doctor":
-        raise SystemExit(_run_doctor(auto_start=args.auto_start, json_output=getattr(args, "doctor_json", False)))
+        raise SystemExit(_run_doctor(auto_start=args.auto_start, json_output=getattr(args, "doctor_json", False), personal=getattr(args, "personal", False)))
     if args.command == "smoke-test":
         raise SystemExit(_run_smoke_test(args))
     if args.command == "up":
@@ -2025,6 +2102,8 @@ def main() -> None:
     if args.command == "templates":
         raise SystemExit(_run_templates_command(args))
     if args.command == "setup":
+        if getattr(args, "personal", False):
+            raise SystemExit(_run_personal_setup(args))
         raise SystemExit(_run_setup_wizard(non_interactive=getattr(args, "non_interactive", False)))
     if args.command == "quickstart":
         raise SystemExit(_run_quickstart(non_interactive=getattr(args, "non_interactive", False)))
@@ -2124,6 +2203,8 @@ def main() -> None:
         raise SystemExit(0)
 
     if args.command == "start":
+        if getattr(args, "personal", False):
+            raise SystemExit(_run_personal_start(args))
         raise SystemExit(_run_start(args))
 
     if args.command == "reset-password":
